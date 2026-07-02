@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Sunrise Bistro — Local Dev & Deploy
 
 This workspace contains a Next.js frontend and a small Express + MongoDB backend.
@@ -50,3 +51,7 @@ Deploy notes
 - Run the Express backend as a separate process (e.g., PM2, systemd) or merge into Next.js custom server if desired.
 
 If you want, I can add Dockerfiles and a docker-compose setup for easy hosting."
+=======
+# paranjape-foods
+Paranjape Foods Website code
+>>>>>>> dda0e9ca584cbae44d428b56aa74f7e8d35c4a5c
