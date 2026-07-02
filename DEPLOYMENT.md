@@ -37,8 +37,10 @@ npm run dev
 3) Frontend: Deploy to Vercel
 
 - Create a Vercel project and connect your GitHub repo.
-- In Project Settings -> Environment Variables, set `NEXT_PUBLIC_API_BASE` to your backend URL.
 - Push to the default branch; Vercel will build with `npm run build` and deploy.
+- Optionally, set `NEXT_PUBLIC_API_BASE` to your backend URL if your frontend uses direct API URLs.
+- If you want frontend `/api/*` requests to proxy through Vercel to the backend, the repo includes `vercel.json` with a rewrite rule to:
+  `https://paranjape-foods.herokuapp.com/api/:path*`
 
 4) Backend: Deploy to Render
 
