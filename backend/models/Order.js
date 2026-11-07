@@ -10,9 +10,12 @@ const orderSchema = new mongoose.Schema(
     items: [
       {
         menuItemId: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: 'MenuItem',
+          type: String, // Accepts both MongoDB ObjectId and string IDs (e.g. 'm1', 'm2')
           required: true,
+        },
+        title: {
+          type: String,
+          default: '',
         },
         quantity: {
           type: Number,
@@ -34,9 +37,14 @@ const orderSchema = new mongoose.Schema(
       ref: 'Address',
       required: true,
     },
+    paymentMethod: {
+      type: String,
+      enum: ['razorpay', 'cod', 'upi', 'offline'],
+      default: 'razorpay',
+    },
     paymentStatus: {
       type: String,
-      enum: ['pending', 'success', 'failed', 'refunded'],
+      enum: ['pending', 'unpaid', 'paid', 'success', 'failed', 'refunded'],
       default: 'pending',
     },
     razorpayOrderId: {
@@ -52,6 +60,22 @@ const orderSchema = new mongoose.Schema(
       enum: ['placed', 'confirmed', 'preparing', 'ready', 'out_for_delivery', 'delivered', 'cancelled'],
       default: 'placed',
     },
+    statusHistory: [
+      {
+        status: {
+          type: String,
+          required: true,
+        },
+        timestamp: {
+          type: Date,
+          default: Date.now,
+        },
+        message: {
+          type: String,
+          default: '',
+        },
+      },
+    ],
     porterDeliveryId: {
       type: String,
       trim: true,

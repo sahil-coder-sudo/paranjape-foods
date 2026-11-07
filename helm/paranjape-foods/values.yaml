@@ -1,0 +1,166 @@
+# Default values for paranjape-foods.
+# This is a YAML-formatted file.
+
+# Global application settings
+global:
+  environment: production
+
+# ----------------------------------------------------
+# Frontend (Next.js 14) Configuration
+# ----------------------------------------------------
+frontend:
+  replicaCount: 2
+
+  image:
+    repository: paranjapefoods/frontend
+    pullPolicy: IfNotPresent
+    tag: "latest"
+
+  imagePullSecrets: []
+  nameOverride: ""
+  fullnameOverride: ""
+
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+  livenessProbe:
+    httpGet:
+      path: /
+      port: 3000
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /
+      port: 3000
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 75
+    targetMemoryUtilizationPercentage: 80
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ----------------------------------------------------
+# Backend (Express API & Real-time SSE) Configuration
+# ----------------------------------------------------
+backend:
+  replicaCount: 2
+
+  image:
+    repository: paranjapefoods/backend
+    pullPolicy: IfNotPresent
+    tag: "latest"
+
+  imagePullSecrets: []
+  nameOverride: ""
+  fullnameOverride: ""
+
+  service:
+    type: ClusterIP
+    port: 4000
+    targetPort: 4000
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+  livenessProbe:
+    httpGet:
+      path: /api/health
+      port: 4000
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /api/health
+      port: 4000
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 75
+    targetMemoryUtilizationPercentage: 80
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ----------------------------------------------------
+# Ingress Configuration (Routing + SSE Buffer Off)
+# ----------------------------------------------------
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    # CRITICAL FOR SSE: Turn off response buffering so real-time events reach clients instantly
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # Long timeouts for persistent Server-Sent Events connections
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  hosts:
+    - host: localhost
+      paths:
+        - path: /api
+          pathType: Prefix
+          service: backend
+        - path: /
+          pathType: Prefix
+          service: frontend
+  tls: []
+  # - secretName: paranjape-foods-tls
+  #   hosts:
+  #     - paranjapefoods.com
+
+# ----------------------------------------------------
+# Non-sensitive ConfigMap
+# ----------------------------------------------------
+config:
+  port: "4000"
+  nodeEnv: "production"
+  nextPublicApiBase: "" # Empty string causes browser to make relative calls to same Ingress host
+
+# ----------------------------------------------------
+# Sensitive Secrets (Override in production via values-prod.yaml or CI/CD)
+# ----------------------------------------------------
+secrets:
+  mongodbUri: "mongodb+srv://sahil:<db_password>@paranjapefoods.vokug.mongodb.net/paranjape_foods"
+  managerPasscode: "paranjape2026"
+  deliveryPasscode: "rider2026"
+  googleGeocodingApiKey: "AIzaSyCZTUAO6QJa2WpMceJpQWtfGGzfvQRVxaQ"
+  razorpayKeyId: ""
+  razorpayKeySecret: ""

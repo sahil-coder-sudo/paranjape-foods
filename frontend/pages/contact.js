@@ -18,8 +18,8 @@ export default function Contact() {
           <p>Reach out for reservations, private brunch plans, and quick menu questions.</p>
           <div className="menu-card">
             <h3>Get in touch</h3>
-            <p>123 Garden Street, Suite 5<br />Sunrise City</p>
-            <p>Phone: <a href="tel:+15551234567">(555) 123-4567</a><br />Email: <a href="mailto:hello@sunrisebistro.example">hello@sunrisebistro.example</a></p>
+            <p>123 Garden Street, Suite 5<br />Pune, Maharashtra</p>
+            <p>Phone: <a href="tel:+919876543210">+91 98765 43210</a><br />Email: <a href="mailto:orders@paranjapefoods.com">orders@paranjapefoods.com</a></p>
           </div>
         </section>
 

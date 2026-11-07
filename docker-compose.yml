@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: paranjape-foods-backend
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - NODE_ENV=production
+      - MONGODB_URI=${MONGODB_URI}
+      - MANAGER_PASSCODE=${MANAGER_PASSCODE:-paranjape2026}
+      - DELIVERY_PASSCODE=${DELIVERY_PASSCODE:-rider2026}
+      - GOOGLE_GEOCODING_API_KEY=${GOOGLE_GEOCODING_API_KEY}
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
+      - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:4000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_BASE=http://localhost:4000
+        - NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}
+    container_name: paranjape-foods-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
