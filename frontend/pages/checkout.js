@@ -15,6 +15,10 @@ export default function Checkout() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
   const [customer, setCustomer] = useState(null);
+  const [customerToken, setCustomerToken] = useState(null);
+  const [authMode, setAuthMode] = useState('login'); // 'login' or 'register'
+  const [authPassword, setAuthPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [formData, setFormData] = useState({
     phone: '',
     name: '',
@@ -47,8 +51,11 @@ export default function Checkout() {
     // Load menu
     fetchMenu();
 
-    // Load customer from localStorage
+    // Load customer & token from localStorage
     const savedCustomer = localStorage.getItem('customer');
+    const savedToken = localStorage.getItem('pf_customer_token');
+    if (savedToken) setCustomerToken(savedToken);
+
     if (savedCustomer) {
       try {
         const parsed = JSON.parse(savedCustomer);
@@ -68,6 +75,76 @@ export default function Checkout() {
       }
     }
   }, []);
+
+  // Google Sign-In setup
+  const handleGoogleSignInResponse = async (response) => {
+    if (!response || !response.credential) return;
+    setLoading(true);
+    setError('');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/google`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential: response.credential }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success || !data.customer) {
+        setError(data.error || 'Google sign-in failed. Please try again.');
+        return;
+      }
+      setCustomer(data.customer);
+      if (data.token) {
+        setCustomerToken(data.token);
+        localStorage.setItem('pf_customer_token', data.token);
+      }
+      localStorage.setItem('customer', JSON.stringify(data.customer));
+      setFormData((prev) => ({
+        ...prev,
+        name: data.customer.name || prev.name,
+        email: data.customer.email || prev.email,
+        phone: data.customer.phone || prev.phone,
+      }));
+      fetchAddresses(data.customer._id);
+      setStep(2);
+    } catch (err) {
+      setError('Unable to authenticate with Google.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || step !== 1 || customer) return;
+
+    const initGoogleAuth = () => {
+      const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+      if (window.google?.accounts?.id && googleClientId) {
+        try {
+          window.google.accounts.id.initialize({
+            client_id: googleClientId,
+            callback: handleGoogleSignInResponse,
+          });
+          const btnEl = document.getElementById('googleSignInContainer');
+          if (btnEl) {
+            btnEl.innerHTML = '';
+            window.google.accounts.id.renderButton(btnEl, {
+              theme: 'outline',
+              size: 'large',
+              width: '280',
+              text: 'continue_with',
+              shape: 'pill',
+            });
+          }
+        } catch (err) {
+          console.warn('Google Identity initialization error:', err);
+        }
+      }
+    };
+
+    const timer = setTimeout(initGoogleAuth, 500);
+    return () => clearTimeout(timer);
+  }, [step, authMode, customer]);
 
   const fetchMenu = async () => {
     try {
@@ -243,54 +320,95 @@ export default function Checkout() {
     }
   };
 
-  const handlePhoneBlur = async (e) => {
-    const raw = e.target.value;
-    const clean = raw.replace(/\D/g, '').trim();
-    if (clean.length === 10) {
-      try {
-        const res = await fetch(`${API_BASE}/api/customer/phone/${clean}`);
-        if (res.ok) {
-          const existing = await res.json();
-          if (existing && existing.phone) {
-            setFormData((prev) => ({
-              ...prev,
-              phone: existing.phone,
-              name: existing.name || prev.name,
-              email: existing.email || prev.email,
-            }));
-          }
-        }
-      } catch (err) {
-        // Ignore lookup error
-      }
-    }
+  const handleLogout = () => {
+    localStorage.removeItem('customer');
+    localStorage.removeItem('pf_customer_token');
+    setCustomer(null);
+    setCustomerToken(null);
+    setAddresses([]);
+    setSelectedAddress(null);
+    setFormData({ phone: '', name: '', email: '' });
+    setAuthPassword('');
+    setError('');
+    setStep(1);
   };
 
   const handleCustomerSubmit = async (e) => {
     e.preventDefault();
-    const phone = formData.phone;
-    const name = formData.name;
-    const email = formData.email;
+    setError('');
+
+    const cleanPhone = String(formData.phone || '').replace(/\D/g, '').trim();
+    if (cleanPhone.length < 10) {
+      setError('Please enter a valid 10-digit mobile number.');
+      return;
+    }
+
+    if (!authPassword || authPassword.trim().length < 4) {
+      setError('Password / PIN must be at least 4 characters long.');
+      return;
+    }
 
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/customer`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone, name, email }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error || !data._id) {
-        setError(data.error || 'Failed to process details. Please try again.');
-        return;
+      if (authMode === 'login') {
+        const res = await fetch(`${API_BASE}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            phone: cleanPhone,
+            password: authPassword.trim(),
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok || !data.success || !data.customer) {
+          setError(data.error || 'Incorrect login details. Please try again.');
+          return;
+        }
+
+        setCustomer(data.customer);
+        if (data.token) {
+          setCustomerToken(data.token);
+          localStorage.setItem('pf_customer_token', data.token);
+        }
+        localStorage.setItem('customer', JSON.stringify(data.customer));
+        fetchAddresses(data.customer._id);
+        setStep(2);
+      } else {
+        // Register mode
+        if (!formData.name || !formData.name.trim()) {
+          setError('Full name is required for new registration.');
+          return;
+        }
+
+        const res = await fetch(`${API_BASE}/api/auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: formData.name.trim(),
+            phone: cleanPhone,
+            password: authPassword.trim(),
+            email: formData.email ? formData.email.trim() : '',
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok || !data.success || !data.customer) {
+          setError(data.error || 'Registration failed. Please try again.');
+          return;
+        }
+
+        setCustomer(data.customer);
+        if (data.token) {
+          setCustomerToken(data.token);
+          localStorage.setItem('pf_customer_token', data.token);
+        }
+        localStorage.setItem('customer', JSON.stringify(data.customer));
+        fetchAddresses(data.customer._id);
+        setStep(2);
       }
-      setError('');
-      setCustomer(data);
-      localStorage.setItem('customer', JSON.stringify(data));
-      fetchAddresses(data._id);
-      setStep(2);
     } catch (err) {
-      setError('Failed to create/fetch customer');
+      setError('Failed to authenticate. Please check that the server is running.');
     } finally {
       setLoading(false);
     }
@@ -534,54 +652,161 @@ export default function Checkout() {
                 <span className="step-badge-indicator">Step 1 of 4</span>
               </div>
 
-              <h2>Step 1: Your Details</h2>
-              <form onSubmit={handleCustomerSubmit}>
-                <div className="form-group">
-                  <label>Phone Number</label>
-                  <input
-                    type="tel"
-                    name="phone"
-                    required
-                    value={formData.phone}
-                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                    onBlur={handlePhoneBlur}
-                    placeholder="10 digit mobile number"
-                  />
+              {customer && customer._id ? (
+                /* Customer Already Logged In */
+                <div className="logged-in-profile-box">
+                  <div className="logged-in-profile-header">
+                    <div className="logged-in-avatar">
+                      {customer.avatar ? (
+                        <img src={customer.avatar} alt={customer.name} />
+                      ) : (
+                        <span>{customer.name?.charAt(0)?.toUpperCase() || 'P'}</span>
+                      )}
+                    </div>
+                    <div>
+                      <h3 style={{ margin: '0 0 4px', fontSize: '1.2rem' }}>Welcome, {customer.name}!</h3>
+                      <p style={{ margin: 0, color: 'var(--muted)', fontSize: '0.9rem' }}>
+                        {customer.phone ? `Mobile: ${customer.phone}` : ''} {customer.email ? ` • ${customer.email}` : ''}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="checkout-footer-buttons" style={{ marginTop: '24px' }}>
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      onClick={handleLogout}
+                    >
+                      Switch Account / Log Out
+                    </button>
+                    <button
+                      type="button"
+                      className="button"
+                      onClick={() => setStep(2)}
+                    >
+                      Continue to Menu →
+                    </button>
+                  </div>
                 </div>
-                <div className="form-group">
-                  <label>Name</label>
-                  <input
-                    type="text"
-                    name="name"
-                    required
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    placeholder="Your name"
-                  />
-                </div>
-                <div className="form-group">
-                  <label>Email (Optional)</label>
-                  <input
-                    type="email"
-                    name="email"
-                    value={formData.email}
-                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                    placeholder="your@email.com"
-                  />
-                </div>
-                <div className="checkout-footer-buttons">
-                  <button
-                    type="button"
-                    className="button-secondary"
-                    onClick={() => router.push('/menu')}
-                  >
-                    ← Back to Menu
-                  </button>
-                  <button type="submit" disabled={loading} className="button">
-                    {loading ? 'Loading...' : 'Continue to Menu →'}
-                  </button>
-                </div>
-              </form>
+              ) : (
+                /* Customer Not Logged In */
+                <>
+                  <h2>Step 1: Customer Account</h2>
+                  <p style={{ color: 'var(--muted)', fontSize: '0.92rem', marginBottom: '20px' }}>
+                    Sign in with your phone or Google to access saved addresses and past orders.
+                  </p>
+
+                  {/* Auth Mode Tabs */}
+                  <div className="auth-tab-group">
+                    <button
+                      type="button"
+                      className={`auth-tab-btn ${authMode === 'login' ? 'active' : ''}`}
+                      onClick={() => { setAuthMode('login'); setError(''); }}
+                    >
+                      Log In
+                    </button>
+                    <button
+                      type="button"
+                      className={`auth-tab-btn ${authMode === 'register' ? 'active' : ''}`}
+                      onClick={() => { setAuthMode('register'); setError(''); }}
+                    >
+                      New Customer (Sign Up)
+                    </button>
+                  </div>
+
+                  {/* Google SSO */}
+                  <div className="google-sso-wrapper">
+                    <div id="googleSignInContainer" style={{ minHeight: '44px', display: 'flex', justifyContent: 'center' }}></div>
+                    <div className="auth-divider">
+                      <span>or continue with mobile number</span>
+                    </div>
+                  </div>
+
+                  <form onSubmit={handleCustomerSubmit}>
+                    {authMode === 'register' && (
+                      <div className="form-group">
+                        <label>Full Name</label>
+                        <input
+                          type="text"
+                          name="name"
+                          required
+                          value={formData.name}
+                          onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                          placeholder="Enter your full name"
+                        />
+                      </div>
+                    )}
+
+                    <div className="form-group">
+                      <label>10-Digit Mobile Number</label>
+                      <input
+                        type="tel"
+                        name="phone"
+                        required
+                        value={formData.phone}
+                        onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                        placeholder="e.g. 9876543210"
+                        maxLength={10}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>{authMode === 'login' ? 'Password' : 'Create Password (min 4 characters)'}</label>
+                      <div className="manager-input-container">
+                        <input
+                          type={showPassword ? 'text' : 'password'}
+                          name="password"
+                          required
+                          value={authPassword}
+                          onChange={(e) => setAuthPassword(e.target.value)}
+                          placeholder={authMode === 'login' ? 'Enter your password' : 'Create a secure password'}
+                          className="manager-passcode-input"
+                        />
+                        <button
+                          type="button"
+                          className="manager-eye-btn"
+                          onClick={() => setShowPassword((prev) => !prev)}
+                          title={showPassword ? 'Hide password' : 'Show password'}
+                        >
+                          {showPassword ? '👁️' : '🔒'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {authMode === 'register' && (
+                      <div className="form-group">
+                        <label>Email (Optional)</label>
+                        <input
+                          type="email"
+                          name="email"
+                          value={formData.email}
+                          onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                          placeholder="your@email.com"
+                        />
+                      </div>
+                    )}
+
+                    {error && (
+                      <div className="error-message" style={{ margin: '14px 0', textAlign: 'left' }}>
+                        {error}
+                      </div>
+                    )}
+
+                    <div className="checkout-footer-buttons">
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() => router.push('/menu')}
+                      >
+                        ← Back to Menu
+                      </button>
+                      <button type="submit" disabled={loading} className="button">
+                        {loading ? 'Verifying...' : authMode === 'login' ? 'Log In & Continue →' : 'Sign Up & Continue →'}
+                      </button>
+                    </div>
+                  </form>
+                </>
+              )}
             </div>
           )}
 

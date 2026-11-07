@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 
 const customerSchema = new mongoose.Schema(
   {
@@ -10,8 +11,8 @@ const customerSchema = new mongoose.Schema(
     },
     phone: {
       type: String,
-      required: true,
       unique: true,
+      sparse: true,
       trim: true,
       index: true,
     },
@@ -21,6 +22,27 @@ const customerSchema = new mongoose.Schema(
       trim: true,
     },
     email: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
+    passwordHash: {
+      type: String,
+      select: false, // Don't return password hash by default
+    },
+    googleId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
+    authProvider: {
+      type: String,
+      enum: ['phone_password', 'google', 'legacy'],
+      default: 'phone_password',
+    },
+    avatar: {
       type: String,
       trim: true,
     },
@@ -41,10 +63,27 @@ const customerSchema = new mongoose.Schema(
       default: Date.now,
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    toJSON: {
+      transform(doc, ret) {
+        delete ret.passwordHash;
+        delete ret.__v;
+        return ret;
+      },
+    },
+  }
 );
 
-// Unique index on phone number (one customer record per phone number)
-customerSchema.index({ phone: 1 }, { unique: true });
+// Password helper methods
+customerSchema.methods.setPassword = async function (password) {
+  const salt = await bcrypt.genSalt(10);
+  this.passwordHash = await bcrypt.hash(password, salt);
+};
+
+customerSchema.methods.comparePassword = async function (candidatePassword) {
+  if (!this.passwordHash) return false;
+  return bcrypt.compare(candidatePassword, this.passwordHash);
+};
 
 module.exports = mongoose.model('Customer', customerSchema);
