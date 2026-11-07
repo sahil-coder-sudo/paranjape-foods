@@ -106,42 +106,66 @@ const navItems = [
 export default function NavBar() {
   const [open, setOpen] = useState(false);
   const [cartCount, setCartCount] = useState(0);
+  const [customer, setCustomer] = useState(null);
   const router = useRouter();
 
-  // Read cart count from localStorage
-  const readCartCount = () => {
+  // Read customer & cart count from localStorage
+  const syncState = () => {
     try {
-      const saved = localStorage.getItem('cart');
-      if (saved) {
-        const parsed = JSON.parse(saved);
+      const savedCart = localStorage.getItem('cart');
+      if (savedCart) {
+        const parsed = JSON.parse(savedCart);
         if (Array.isArray(parsed)) {
           const count = parsed.reduce((sum, item) => sum + (item.quantity || 1), 0);
           setCartCount(count);
-          return;
+        } else {
+          setCartCount(0);
         }
+      } else {
+        setCartCount(0);
+      }
+
+      const savedCust = localStorage.getItem('customer');
+      if (savedCust) {
+        const parsedCust = JSON.parse(savedCust);
+        if (parsedCust && parsedCust._id) {
+          setCustomer(parsedCust);
+        } else {
+          setCustomer(null);
+        }
+      } else {
+        setCustomer(null);
       }
     } catch (e) {
       // ignore
     }
-    setCartCount(0);
   };
 
   useEffect(() => {
-    readCartCount();
-    window.addEventListener('storage', readCartCount);
-    window.addEventListener('focus', readCartCount);
+    syncState();
+    window.addEventListener('storage', syncState);
+    window.addEventListener('focus', syncState);
     return () => {
-      window.removeEventListener('storage', readCartCount);
-      window.removeEventListener('focus', readCartCount);
+      window.removeEventListener('storage', syncState);
+      window.removeEventListener('focus', syncState);
     };
   }, []);
 
-  // Refresh cart count whenever drawer opens
+  // Refresh whenever drawer opens
   useEffect(() => {
     if (open) {
-      readCartCount();
+      syncState();
     }
   }, [open]);
+
+  const handleCustomerLogout = () => {
+    localStorage.removeItem('customer');
+    localStorage.removeItem('pf_customer_token');
+    setCustomer(null);
+    if (router.pathname === '/checkout') {
+      window.location.reload();
+    }
+  };
 
   // Close drawer on Escape
   useEffect(() => {
@@ -187,6 +211,53 @@ export default function NavBar() {
         </button>
 
         <div className="header-right-actions">
+          {/* Customer Profile Status */}
+          {customer ? (
+            <button
+              type="button"
+              className="header-customer-chip"
+              onClick={() => navigate('/checkout')}
+              title={`Logged in as ${customer.name}`}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                background: 'rgba(201, 79, 47, 0.08)',
+                border: '1px solid rgba(201, 79, 47, 0.2)',
+                borderRadius: '20px',
+                padding: '6px 12px',
+                fontSize: '0.82rem',
+                fontWeight: 600,
+                color: 'var(--accent)',
+                cursor: 'pointer',
+              }}
+            >
+              <span>👤 {customer.name?.split(' ')[0]}</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="header-customer-chip"
+              onClick={() => navigate('/checkout')}
+              title="Customer Login / Sign Up"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                background: 'none',
+                border: '1px solid var(--border)',
+                borderRadius: '20px',
+                padding: '6px 10px',
+                fontSize: '0.78rem',
+                fontWeight: 600,
+                color: 'var(--muted)',
+                cursor: 'pointer',
+              }}
+            >
+              <span>Sign In</span>
+            </button>
+          )}
+
           {/* Quick Cart Shortcut (when items are in cart) */}
           {cartCount > 0 && (
             <button
@@ -250,6 +321,55 @@ export default function NavBar() {
           >
             ✕
           </button>
+        </div>
+
+        {/* Customer Account Strip in Drawer */}
+        <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', background: customer ? 'rgba(201, 79, 47, 0.04)' : '#fafafa' }}>
+          {customer ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text)' }}>
+                  👤 {customer.name}
+                </div>
+                <div style={{ fontSize: '0.76rem', color: 'var(--muted)' }}>
+                  {customer.phone || customer.email}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCustomerLogout}
+                style={{
+                  background: 'none',
+                  border: '1px solid var(--border)',
+                  borderRadius: '6px',
+                  padding: '4px 8px',
+                  fontSize: '0.74rem',
+                  color: '#c94f2f',
+                  cursor: 'pointer',
+                }}
+              >
+                Log Out
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => navigate('/checkout')}
+              style={{
+                width: '100%',
+                padding: '9px 12px',
+                borderRadius: '8px',
+                background: '#ffffff',
+                border: '1.5px solid var(--accent)',
+                color: 'var(--accent)',
+                fontSize: '0.82rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Customer Log In / Sign Up
+            </button>
+          )}
         </div>
 
         <div className="drawer-subhead">

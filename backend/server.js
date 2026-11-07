@@ -26,6 +26,12 @@ const ContactMessage = require('./models/ContactMessage');
 const Customer = require('./models/Customer');
 const Address = require('./models/Address');
 const Order = require('./models/Order');
+const {
+  generateCustomerToken,
+  verifyCustomerToken,
+  requireCustomerAuth,
+  verifyGoogleIdToken,
+} = require('./utils/auth');
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -143,6 +149,199 @@ async function generateCustomerKey(name, phone, customDate) {
   return key;
 }
 
+// ===== CUSTOMER AUTHENTICATION (PHONE + PASSWORD & GOOGLE SSO) =====
+
+// Register new customer with Phone & Password
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { name, phone, password, email } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required for registration.' });
+    }
+    if (!phone) {
+      return res.status(400).json({ error: 'Phone number is required.' });
+    }
+
+    const cleanPhone = String(phone).replace(/\D/g, '').trim();
+    if (cleanPhone.length < 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit phone number.' });
+    }
+    if (!password || String(password).trim().length < 4) {
+      return res.status(400).json({ error: 'Password must be at least 4 characters long.' });
+    }
+
+    const existing = await Customer.findOne({ phone: cleanPhone });
+    if (existing) {
+      return res.status(409).json({
+        error: 'An account with this phone number already exists. Please log in.',
+        code: 'ACCOUNT_EXISTS',
+      });
+    }
+
+    const cleanName = name.trim();
+    const customerKey = await generateCustomerKey(cleanName, cleanPhone);
+
+    const customer = new Customer({
+      customerKey,
+      phone: cleanPhone,
+      name: cleanName,
+      email: email ? email.trim().toLowerCase() : '',
+      authProvider: 'phone_password',
+      lastLoginAt: new Date(),
+    });
+    await customer.setPassword(String(password).trim());
+    await customer.save();
+
+    const token = generateCustomerToken(customer);
+    logger.info(`[Auth Register] New customer registered: ${customer._id} (${cleanPhone})`);
+
+    res.status(201).json({
+      success: true,
+      token,
+      customer: customer.toJSON(),
+      message: 'Account registered successfully',
+    });
+  } catch (error) {
+    logger.error('[Auth Register] Registration error:', error);
+    res.status(500).json({ error: 'Registration failed. Please try again.' });
+  }
+});
+
+// Login customer with Phone & Password
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { phone, password } = req.body;
+    if (!phone) {
+      return res.status(400).json({ error: 'Phone number is required.' });
+    }
+
+    const cleanPhone = String(phone).replace(/\D/g, '').trim();
+    if (cleanPhone.length < 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit phone number.' });
+    }
+    if (!password) {
+      return res.status(400).json({ error: 'Password is required.' });
+    }
+
+    const customer = await Customer.findOne({ phone: cleanPhone })
+      .select('+passwordHash')
+      .populate('addresses');
+
+    if (!customer) {
+      return res.status(404).json({
+        error: 'No account found with this phone number. Please register first.',
+        code: 'USER_NOT_FOUND',
+      });
+    }
+
+    // If account was created before passwords existed, initialize their password now
+    if (!customer.passwordHash) {
+      await customer.setPassword(String(password).trim());
+      await customer.save();
+    } else {
+      const isMatch = await customer.comparePassword(String(password).trim());
+      if (!isMatch) {
+        return res.status(401).json({
+          error: 'Incorrect password. Please try again.',
+          code: 'INVALID_CREDENTIALS',
+        });
+      }
+    }
+
+    customer.lastLoginAt = new Date();
+    await customer.save();
+
+    const token = generateCustomerToken(customer);
+    logger.info(`[Auth Login] Customer logged in: ${customer._id} (${cleanPhone})`);
+
+    res.json({
+      success: true,
+      token,
+      customer: customer.toJSON(),
+      message: 'Login successful',
+    });
+  } catch (error) {
+    logger.error('[Auth Login] Login error:', error);
+    res.status(500).json({ error: 'Login failed. Please try again.' });
+  }
+});
+
+// Google SSO: Verify Google Identity Services ID token & sign in / register
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    const { credential } = req.body;
+    if (!credential) {
+      return res.status(400).json({ error: 'Google credential is required.' });
+    }
+
+    const payload = await verifyGoogleIdToken(credential);
+    const { sub: googleId, email, name, picture } = payload;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Google account did not provide an email address.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    let customer = await Customer.findOne({
+      $or: [{ googleId }, { email: cleanEmail }],
+    }).populate('addresses');
+
+    if (!customer) {
+      // Register new user via Google
+      const customerKey = await generateCustomerKey(name || 'google_user', 'google');
+      customer = await Customer.create({
+        customerKey,
+        name: name || 'Google Customer',
+        email: cleanEmail,
+        googleId,
+        avatar: picture || '',
+        authProvider: 'google',
+        lastLoginAt: new Date(),
+      });
+      logger.info(`[Auth Google] New customer registered via Google SSO: ${customer._id} (${cleanEmail})`);
+    } else {
+      // Existing user logging in via Google
+      if (!customer.googleId) customer.googleId = googleId;
+      if (picture && !customer.avatar) customer.avatar = picture;
+      customer.lastLoginAt = new Date();
+      await customer.save();
+      logger.info(`[Auth Google] Existing customer logged in via Google SSO: ${customer._id} (${cleanEmail})`);
+    }
+
+    const token = generateCustomerToken(customer);
+    res.json({
+      success: true,
+      token,
+      customer: customer.toJSON(),
+      message: 'Google login successful',
+    });
+  } catch (error) {
+    logger.error('[Auth Google] Google authentication error:', error);
+    res.status(400).json({ error: error.message || 'Google authentication failed.' });
+  }
+});
+
+// Get currently authenticated customer session
+app.get('/api/auth/me', requireCustomerAuth, async (req, res) => {
+  try {
+    const customer = await Customer.findById(req.customer.customerId)
+      .populate('addresses')
+      .populate('orders');
+
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer session not found.' });
+    }
+
+    res.json({
+      success: true,
+      customer: customer.toJSON(),
+    });
+  } catch (error) {
+    logger.error('[Auth Me] Error fetching session:', error);
+    res.status(500).json({ error: 'Failed to retrieve customer session.' });
+  }
+});
+
 // Get, create, or update customer by phone number
 app.post('/api/customer', async (req, res) => {
   try {
@@ -196,7 +395,9 @@ app.post('/api/customer', async (req, res) => {
       await customer.save();
     }
 
-    res.json(customer);
+    const token = generateCustomerToken(customer);
+    const customerObj = customer.toJSON ? customer.toJSON() : customer.toObject();
+    res.json({ ...customerObj, token });
   } catch (error) {
     console.error('Customer processing error:', error);
     res.status(500).json({ error: 'Unable to process customer request.' });
@@ -512,9 +713,14 @@ app.get('/api/orders/:customerId', async (req, res) => {
 });
 
 // ===== KITCHEN & DELIVERY AUTHENTICATION =====
-const MANAGER_PASSCODE = process.env.MANAGER_PASSCODE || 'paranjape2026';
-const DELIVERY_PASSCODE = process.env.DELIVERY_PASSCODE || 'rider2026';
-const AUTH_SECRET = process.env.MANAGER_AUTH_SECRET || 'paranjape_kitchen_auth_secret_key_2026';
+const isProduction = process.env.NODE_ENV === 'production';
+const MANAGER_PASSCODE = process.env.MANAGER_PASSCODE || (isProduction ? null : 'paranjape2026');
+const DELIVERY_PASSCODE = process.env.DELIVERY_PASSCODE || (isProduction ? null : 'rider2026');
+const AUTH_SECRET = process.env.MANAGER_AUTH_SECRET || process.env.JWT_SECRET || 'paranjape_kitchen_auth_secret_key_2026';
+
+if (isProduction && (!process.env.MANAGER_PASSCODE || !process.env.DELIVERY_PASSCODE)) {
+  logger.warn('[Auth Warning] MANAGER_PASSCODE or DELIVERY_PASSCODE is not set in environment variables! Please configure in Heroku / production.');
+}
 
 function generateStaffToken(role = 'manager') {
   const expiry = Date.now() + 24 * 60 * 60 * 1000; // 24 hours validity
@@ -578,10 +784,12 @@ app.post('/api/admin/auth/verify', (req, res) => {
     const { passcode } = req.body;
     const cleanInput = String(passcode || '').trim();
 
-    const isValid =
-      cleanInput === MANAGER_PASSCODE ||
-      cleanInput === '2026' ||
-      cleanInput.toLowerCase() === 'paranjape2026';
+    if (!MANAGER_PASSCODE) {
+      logger.error('[Manager Auth] MANAGER_PASSCODE not configured on server.');
+      return res.status(500).json({ error: 'Manager authentication not configured on server.' });
+    }
+
+    const isValid = cleanInput === MANAGER_PASSCODE;
 
     if (!isValid) {
       logger.warn('[Manager Auth] Invalid passcode attempt entered');
@@ -623,19 +831,19 @@ app.post('/api/delivery/auth/verify', (req, res) => {
     const { passcode } = req.body;
     const cleanInput = String(passcode || '').trim();
 
-    // Accept DELIVERY_PASSCODE, quick PIN '1234', 'rider2026', or MANAGER_PASSCODE
-    const isValid =
-      cleanInput === DELIVERY_PASSCODE ||
-      cleanInput === '1234' ||
-      cleanInput.toLowerCase() === 'rider2026' ||
-      cleanInput === MANAGER_PASSCODE ||
-      cleanInput === '2026';
+    if (!DELIVERY_PASSCODE && !MANAGER_PASSCODE) {
+      logger.error('[Delivery Auth] DELIVERY_PASSCODE not configured on server.');
+      return res.status(500).json({ error: 'Delivery authentication not configured on server.' });
+    }
+
+    // Accept valid DELIVERY_PASSCODE (or MANAGER_PASSCODE for manager oversight)
+    const isValid = cleanInput === DELIVERY_PASSCODE || cleanInput === MANAGER_PASSCODE;
 
     if (!isValid) {
       logger.warn('[Delivery Auth] Invalid delivery passcode attempt entered');
       return res.status(401).json({
         success: false,
-        error: 'Incorrect delivery PIN. Please enter valid rider passcode.',
+        error: 'Incorrect delivery passcode. Please enter a valid rider passcode.',
       });
     }
 
