@@ -1,0 +1,9 @@
+apiVersion: v2
+name: paranjape-foods
+description: Helm chart for Paranjape Foods Restaurant & Delivery Platform (Next.js + Express SSE)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+maintainers:
+  - name: Paranjape Foods Engineering
+    email: sahilparanjape10@gmail.com

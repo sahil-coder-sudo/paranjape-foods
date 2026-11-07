@@ -1,0 +1,63 @@
+# Production override values for paranjape-foods Helm chart
+# Usage: helm upgrade --install paranjape-foods ./helm/paranjape-foods -f ./helm/paranjape-foods/values-prod.yaml
+
+global:
+  environment: production
+
+frontend:
+  replicaCount: 3
+  image:
+    repository: ghcr.io/sahilparanjape/paranjape-foods-frontend
+    tag: "v1.0.0"
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+backend:
+  replicaCount: 3
+  image:
+    repository: ghcr.io/sahilparanjape/paranjape-foods-backend
+    tag: "v1.0.0"
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: paranjapefoods.com
+      paths:
+        - path: /api
+          pathType: Prefix
+          service: backend
+        - path: /
+          pathType: Prefix
+          service: frontend
+  tls:
+    - secretName: paranjape-foods-tls
+      hosts:
+        - paranjapefoods.com
+
+# Replace with your actual production secrets before running in production
+secrets:
+  mongodbUri: "mongodb+srv://sahil:REPLACE_WITH_PROD_DB_PASSWORD@paranjapefoods.vokug.mongodb.net/paranjape_foods?retryWrites=true&w=majority"
+  managerPasscode: "839201"
+  deliveryPasscode: "472910"
+  googleGeocodingApiKey: "AIzaSyCZTUAO6QJa2WpMceJpQWtfGGzfvQRVxaQ"
+  razorpayKeyId: ""
+  razorpayKeySecret: ""

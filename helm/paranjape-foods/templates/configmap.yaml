@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "paranjape-foods.fullname" . }}-config
+  labels:
+    {{- include "paranjape-foods.labels" . | nindent 4 }}
+data:
+  PORT: {{ .Values.config.port | quote }}
+  NODE_ENV: {{ .Values.config.nodeEnv | quote }}
+  NEXT_PUBLIC_API_BASE: {{ .Values.config.nextPublicApiBase | quote }}

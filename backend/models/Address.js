@@ -7,6 +7,16 @@ const addressSchema = new mongoose.Schema(
       ref: 'Customer',
       required: true,
     },
+    flatNo: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    buildingName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
     street: {
       type: String,
       required: true,
@@ -24,16 +34,16 @@ const addressSchema = new mongoose.Schema(
     },
     zipCode: {
       type: String,
-      required: true,
       trim: true,
+      default: '',
     },
     latitude: {
       type: Number,
-      required: true,
+      default: 18.5204, // Default to Pune center coordinates
     },
     longitude: {
       type: Number,
-      required: true,
+      default: 73.8567,
     },
     isDefault: {
       type: Boolean,

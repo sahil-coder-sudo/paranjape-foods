@@ -15,10 +15,10 @@ export default function About() {
 
         <section className="section">
           <h2>About us</h2>
-          <p>Sunrise Bistro began as a small neighborhood kitchen where fresh ingredients, warm hospitality, and modern comfort food come together.</p>
+          <p>Paranjape Foods began as a kitchen where fresh ingredients, warm hospitality, and authentic comfort food come together.</p>
           <div className="menu-card">
             <h3>Our story</h3>
-            <p>We believe in seasonal menus, thoughtful sourcing, and meals that feel familiar yet exciting. Every recipe is designed to pair well with good company and relaxed mornings.</p>
+            <p>We believe in seasonal menus, thoughtful sourcing, and meals that feel familiar yet exciting. Every recipe is designed to bring families and friends together with delicious food.</p>
           </div>
         </section>
 
@@ -27,17 +27,17 @@ export default function About() {
           <div className="info-grid">
             <article className="info-card">
               <h3>Local ingredients</h3>
-              <p>We support nearby farms and bakers so every dish stays bright, fresh, and crafted with care.</p>
+              <p>We support nearby farms and authentic spice suppliers so every dish stays bright, fresh, and crafted with care.</p>
             </article>
             <article className="info-card">
               <h3>Quality service</h3>
-              <p>Friendly, fast, and attentive service is part of every visit, whether you're dining in or picking up takeout.</p>
+              <p>Friendly, fast, and attentive service is part of every order, whether you're dining in or ordering online for home delivery.</p>
             </article>
           </div>
         </section>
 
         <footer className="footer">
-          <p>Discover the flavor behind every dish at Sunrise Bistro.</p>
+          <p>Discover the flavor behind every dish at Paranjape Foods.</p>
         </footer>
       </main>
     </>
