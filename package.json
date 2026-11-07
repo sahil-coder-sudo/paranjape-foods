@@ -15,9 +15,14 @@
     "dev:frontend": "npm run dev --workspace=frontend",
     "dev:backend": "npm run dev --workspace=backend",
     "backend": "npm run start --workspace=backend",
-    "build": "npm run build --workspace=frontend",
-    "build:all": "npm run build --workspace=frontend",
+    "build": "npm run build --workspace=frontend && cp -R frontend/.next .next",
+    "build:all": "npm run build --workspace=frontend && cp -R frontend/.next .next",
     "start": "npm run start --workspace=frontend",
     "seed": "npm run seed --workspace=backend"
+  },
+  "dependencies": {
+    "next": "14.2.13",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   }
 }
