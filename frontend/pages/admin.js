@@ -85,7 +85,9 @@ export default function AdminPortal() {
   const [resetStaffMessage, setResetStaffMessage] = useState({ text: '', type: '' });
   const [staffSubFilter, setStaffSubFilter] = useState('all'); // 'all' | 'managers' | 'riders' | 'fallbacks'
 
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:4000';
+  const API_BASE =
+    process.env.NEXT_PUBLIC_API_BASE ||
+    (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:4000');
 
   // 1. Check existing session on mount
   useEffect(() => {
@@ -132,10 +134,15 @@ export default function AdminPortal() {
     }
   }, [isAuthenticated, token, activeTab, reportPeriod, reportMonth]);
 
+  const getApiUrl = (endpoint) => {
+    const base = API_BASE || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
+    return new URL(endpoint.startsWith('/') ? `${base}${endpoint}` : `${base}/${endpoint}`);
+  };
+
   const fetchReports = async (period = reportPeriod, month = reportMonth) => {
     setReportLoading(true);
     try {
-      const url = new URL(`${API_BASE}/api/admin/reports`);
+      const url = getApiUrl('/api/admin/reports');
       url.searchParams.set('period', period);
       if (period === 'daily' && month) {
         url.searchParams.set('month', month);
@@ -273,7 +280,7 @@ export default function AdminPortal() {
   const fetchCustomers = async (search = customerSearch) => {
     setCustomersLoading(true);
     try {
-      const url = new URL(`${API_BASE}/api/admin/customers`);
+      const url = getApiUrl('/api/admin/customers');
       if (search) url.searchParams.set('search', search);
 
       const res = await fetch(url.toString(), {

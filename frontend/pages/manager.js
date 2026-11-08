@@ -204,7 +204,9 @@ export default function ManagerPortal() {
   const [reportLoading, setReportLoading] = useState(false);
 
   const eventSourceRef = useRef(null);
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:4000';
+  const API_BASE =
+    process.env.NEXT_PUBLIC_API_BASE ||
+    (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:4000');
 
   const fetchDailyReport = async (date = reportDate) => {
     setReportLoading(true);

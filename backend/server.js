@@ -49,9 +49,37 @@ const app = express();
 const port = process.env.PORT || 4000;
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/paranjape_foods';
 
-app.use(cors());
+const corsOptions = {
+  origin: true, // Dynamically allows the requesting origin (all Vercel domains, custom domains, and localhost)
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-admin-token',
+    'x-manager-token',
+    'x-delivery-token',
+    'x-requested-with',
+    'Accept',
+    'Origin',
+  ],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(logger.requestLogger);
+
+// Root Health & Service Identification Route
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'Paranjape Foods API',
+    uptime: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // Initialize Razorpay (only if keys are provided; deferred for now)
 let razorpay = null;

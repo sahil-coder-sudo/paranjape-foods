@@ -100,7 +100,9 @@ export default function DeliveryPortal() {
   const [updatingId, setUpdatingId] = useState(null);
 
   const eventSourceRef = useRef(null);
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:4000';
+  const API_BASE =
+    process.env.NEXT_PUBLIC_API_BASE ||
+    (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:4000');
 
   // 1. Play audio chime on new ready-to-deliver order
   const playChime = () => {
