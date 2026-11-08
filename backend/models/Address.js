@@ -39,7 +39,7 @@ const addressSchema = new mongoose.Schema(
     },
     latitude: {
       type: Number,
-      default: 18.5204, // Default to Pune center coordinates
+      default: 18.5204, // Default center coordinates
     },
     longitude: {
       type: Number,

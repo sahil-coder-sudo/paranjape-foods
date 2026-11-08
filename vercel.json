@@ -1,8 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "nextjs",
-  "buildCommand": "npm run build --workspace=frontend && cp -R frontend/.next .next",
-  "outputDirectory": ".next",
   "rewrites": [
     {
       "source": "/api/:path*",

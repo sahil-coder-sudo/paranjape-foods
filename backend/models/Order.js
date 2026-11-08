@@ -84,6 +84,14 @@ const orderSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    assignedRiderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'StaffUser',
+      default: null,
+    },
+    assignedAt: {
+      type: Date,
+    },
     estimatedETA: {
       type: Date,
     },

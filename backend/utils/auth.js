@@ -88,10 +88,43 @@ async function verifyGoogleIdToken(idToken) {
   }
 }
 
+/**
+ * Generate a JWT token for a staff user (owner, manager, delivery)
+ */
+function generateStaffUserToken(staffUser) {
+  return jwt.sign(
+    {
+      staffId: staffUser._id.toString(),
+      name: staffUser.name,
+      phone: staffUser.phone,
+      role: staffUser.role,
+      vehicleNumber: staffUser.vehicleNumber || '',
+    },
+    JWT_SECRET,
+    { expiresIn: '24h' }
+  );
+}
+
+/**
+ * Verify staff user JWT token
+ */
+function verifyStaffUserToken(token, allowedRoles = ['owner', 'manager', 'delivery']) {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (!decoded || !decoded.staffId) return null;
+    if (allowedRoles.length > 0 && !allowedRoles.includes(decoded.role)) return null;
+    return decoded;
+  } catch (err) {
+    return null;
+  }
+}
+
 module.exports = {
   JWT_SECRET,
   generateCustomerToken,
   verifyCustomerToken,
   requireCustomerAuth,
   verifyGoogleIdToken,
+  generateStaffUserToken,
+  verifyStaffUserToken,
 };

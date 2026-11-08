@@ -54,8 +54,8 @@ const TRACKING_MILESTONES = [
   },
   {
     key: 'delivered',
-    title: 'Delivered',
-    desc: 'Order handed over. Enjoy your meal! Bon appétit.',
+    title: 'Handed to Resident (Delivered)',
+    desc: 'Order safely handed over to resident. Enjoy your meal!',
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round">
         <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -220,7 +220,7 @@ export default function TrackOrder() {
             Track Your Order
           </h1>
           <p style={{ margin: 0, color: 'var(--muted)', fontSize: '0.92rem' }}>
-            Live Amazon-style periodic updates from kitchen preparation to doorstep delivery.
+            Live periodic updates from kitchen preparation to doorstep delivery.
           </p>
         </div>
 
@@ -260,8 +260,8 @@ export default function TrackOrder() {
 
         {order && (
           <div>
-            {/* Amazon-Style Order Status Card */}
-            <div className="amazon-tracker-card">
+            {/* Live Order Status Card */}
+            <div className="order-tracker-card">
               {/* ETA Banner */}
               <div className="tracker-eta-banner">
                 <div className="tracker-eta-info">
@@ -291,15 +291,15 @@ export default function TrackOrder() {
               </div>
 
               {isCancelled ? (
-                <div style={{ padding: '20px', background: '#fce8e6', borderRadius: '12px', color: '#c94f2f' }}>
+                <div style={{ padding: '20px', background: '#fce8e6', borderRadius: '12px', color: '#ec2227' }}>
                   <strong>This order was cancelled.</strong>
                   <p style={{ margin: '4px 0 0', fontSize: '0.88rem' }}>
                     If you have questions or require a refund, please contact customer support.
                   </p>
                 </div>
               ) : (
-                /* The Amazon-style vertical timeline */
-                <div className="amazon-timeline">
+                /* The vertical status timeline */
+                <div className="order-timeline">
                   {TRACKING_MILESTONES.map((milestone, idx) => {
                     const isCompleted = currentRank > idx;
                     const isActive = currentRank === idx;
@@ -361,6 +361,81 @@ export default function TrackOrder() {
               )}
             </div>
 
+            {/* Delivery Partner Assigned Card */}
+            {order.assignedRiderId && typeof order.assignedRiderId === 'object' && order.assignedRiderId.name && ['ready', 'out_for_delivery', 'delivered'].includes(order.orderStatus) && (
+              <div
+                style={{
+                  background: 'var(--card)',
+                  border: '1.5px solid #d4e8db',
+                  borderRadius: '16px',
+                  padding: '16px 20px',
+                  marginBottom: '20px',
+                  boxShadow: '0 4px 16px rgba(0, 0, 0, 0.04)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '14px',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                  <div
+                    style={{
+                      width: '46px',
+                      height: '46px',
+                      borderRadius: '50%',
+                      background: 'linear-gradient(135deg, rgba(1, 98, 31, 0.15) 0%, rgba(1, 98, 31, 0.05) 100%)',
+                      border: '1.5px solid rgba(1, 98, 31, 0.25)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '1.4rem',
+                      flexShrink: 0,
+                    }}
+                  >
+                    🛵
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.74rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#01621f' }}>
+                      {order.orderStatus === 'delivered' ? 'Delivered by' : 'Assigned Delivery Partner'}
+                    </div>
+                    <div style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--text)', marginTop: '2px' }}>
+                      {order.assignedRiderId.name}
+                    </div>
+                    {order.assignedRiderId.vehicleNumber && (
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '0.78rem', color: 'var(--muted)', marginTop: '3px' }}>
+                        <span>Vehicle Reg:</span>
+                        <span style={{ padding: '2px 6px', background: 'rgba(0,0,0,0.05)', borderRadius: '4px', fontWeight: 700, color: 'var(--text)' }}>
+                          {order.assignedRiderId.vehicleNumber}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {order.assignedRiderId.phone && order.orderStatus === 'out_for_delivery' && (
+                  <a
+                    href={`tel:${order.assignedRiderId.phone}`}
+                    className="button"
+                    style={{
+                      background: '#01621f',
+                      borderColor: '#01621f',
+                      padding: '10px 16px',
+                      fontSize: '0.86rem',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      textDecoration: 'none',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    <span>📞</span>
+                    <span>Call Partner</span>
+                  </a>
+                )}
+              </div>
+            )}
+
             {/* Delivery Address & Items Breakdown */}
             <div className="order-details-card">
               <div className="order-details-header">
@@ -368,22 +443,39 @@ export default function TrackOrder() {
                   <div className="order-id-label">Delivery Destination</div>
                   <div style={{ fontWeight: 600, fontSize: '0.98rem', color: 'var(--text)', marginTop: '2px' }}>
                     {order.addressId
-                      ? `${order.addressId.flatNo ? order.addressId.flatNo + ', ' : ''}${order.addressId.buildingName ? order.addressId.buildingName + ', ' : ''}${order.addressId.street || ''}, ${order.addressId.city || 'Pune'}`
-                      : 'Pune, Maharashtra'}
+                      ? `${order.addressId.flatNo ? order.addressId.flatNo + ', ' : ''}${order.addressId.buildingName ? order.addressId.buildingName + ', ' : ''}${order.addressId.street || ''}${order.addressId.city ? ', ' + order.addressId.city : ''}`
+                      : 'Delivery Address'}
                   </div>
                 </div>
-                <span
-                  style={{
-                    background: '#e6f4ea',
-                    color: '#137333',
-                    fontSize: '0.8rem',
-                    fontWeight: 700,
-                    padding: '5px 12px',
-                    borderRadius: '20px',
-                  }}
-                >
-                  {order.paymentMethod === 'cod' ? 'Pay on Delivery' : 'Paid Online'}
-                </span>
+                {order.paymentMethod === 'razorpay' ? (
+                  <span
+                    style={{
+                      background: '#e6f5eb',
+                      color: '#01621f',
+                      border: '1px solid #a3d9b4',
+                      fontSize: '0.8rem',
+                      fontWeight: 700,
+                      padding: '5px 12px',
+                      borderRadius: '20px',
+                    }}
+                  >
+                    ✓ Paid Online via UPI
+                  </span>
+                ) : (
+                  <span
+                    style={{
+                      background: order.orderStatus === 'delivered' ? '#e6f5eb' : '#fef7e0',
+                      color: order.orderStatus === 'delivered' ? '#01621f' : '#b06000',
+                      border: order.orderStatus === 'delivered' ? '1px solid #a3d9b4' : '1px solid #f9ab00',
+                      fontSize: '0.8rem',
+                      fontWeight: 700,
+                      padding: '5px 12px',
+                      borderRadius: '20px',
+                    }}
+                  >
+                    {order.orderStatus === 'delivered' ? 'Cash/UPI Collected' : 'Collect Cash/UPI'}
+                  </span>
+                )}
               </div>
 
               {/* Items List */}

@@ -30,15 +30,15 @@ export default function Checkout() {
     flatNo: '',
     buildingName: '',
     street: '',
-    city: 'Pune',
-    state: 'Maharashtra',
+    city: '',
+    state: '',
     zipCode: '',
     latitude: 18.5204,
     longitude: 73.8567,
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState('cod'); // 'cod' or 'razorpay'
+  const [paymentMethod, setPaymentMethod] = useState('razorpay'); // 'razorpay' (UPI) or 'cod'
   const [placedOrder, setPlacedOrder] = useState(null);
 
   const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:4000';
@@ -374,6 +374,30 @@ export default function Checkout() {
         localStorage.setItem('customer', JSON.stringify(data.customer));
         fetchAddresses(data.customer._id);
         setStep(2);
+      } else if (authMode === 'reset') {
+        const res = await fetch(`${API_BASE}/api/auth/reset-password`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            phone: cleanPhone,
+            newPassword: authPassword.trim(),
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok || !data.success || !data.customer) {
+          setError(data.error || 'Password reset failed. Please verify your phone number.');
+          return;
+        }
+
+        setCustomer(data.customer);
+        if (data.token) {
+          setCustomerToken(data.token);
+          localStorage.setItem('pf_customer_token', data.token);
+        }
+        localStorage.setItem('customer', JSON.stringify(data.customer));
+        fetchAddresses(data.customer._id);
+        setStep(2);
       } else {
         // Register mode
         if (!formData.name || !formData.name.trim()) {
@@ -454,8 +478,8 @@ export default function Checkout() {
           flatNo: '',
           buildingName: '',
           street: '',
-          city: 'Pune',
-          state: 'Maharashtra',
+          city: '',
+          state: '',
           zipCode: '',
           latitude: 18.5204,
           longitude: 73.8567,
@@ -536,27 +560,42 @@ export default function Checkout() {
     }
   };
 
-  const initiateRazorpayPayment = (orderData) => {
+  const loadRazorpayScript = () => {
+    return new Promise((resolve) => {
+      if (typeof window !== 'undefined' && window.Razorpay) {
+        resolve(true);
+        return;
+      }
+      const existing = typeof document !== 'undefined' && document.getElementById('razorpay-checkout-script');
+      if (existing) {
+        if (window.Razorpay) {
+          resolve(true);
+        } else {
+          existing.addEventListener('load', () => resolve(true));
+        }
+        return;
+      }
+      const script = document.createElement('script');
+      script.id = 'razorpay-checkout-script';
+      script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+      script.onload = () => resolve(true);
+      script.onerror = () => resolve(false);
+      document.body.appendChild(script);
+    });
+  };
+
+  const initiateRazorpayPayment = async (orderData) => {
     const selectedAddrObj = addresses.find((a) => a._id === selectedAddress) || newAddress;
 
-    if (typeof window === 'undefined' || !window.Razorpay) {
-      // If Razorpay SDK didn't load, smoothly fall back to Pay on Delivery
-      setPlacedOrder({
-        orderId: orderData.orderId,
-        totalAmount: orderData.amount || calculateTotal(),
-        items: [...cart],
-        paymentMethod: 'cod',
-        address: selectedAddrObj,
-        createdAt: new Date().toISOString(),
-      });
-      localStorage.removeItem('cart');
-      setCart([]);
-      setStep(5);
+    const loaded = await loadRazorpayScript();
+    if (!loaded || typeof window === 'undefined' || !window.Razorpay) {
+      setError('Could not open Razorpay window. Please check your connection or switch to Pay on Delivery.');
+      setLoading(false);
       return;
     }
 
     const options = {
-      key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_placeholder',
+      key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_TxVQKWvk1rOGz7',
       amount: Math.round(Number(orderData.amount) * 100),
       currency: 'INR',
       name: 'Paranjape Foods',
@@ -569,6 +608,7 @@ export default function Checkout() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               orderId: orderData.orderId,
+              razorpayOrderId: response.razorpay_order_id || orderData.razorpayOrderId,
               razorpayPaymentId: response.razorpay_payment_id,
               razorpaySignature: response.razorpay_signature,
             }),
@@ -598,9 +638,37 @@ export default function Checkout() {
         name: customer?.name || '',
         email: customer?.email || '',
         contact: customer?.phone || '',
+        method: 'upi',
+      },
+      config: {
+        display: {
+          blocks: {
+            upi: {
+              name: 'Pay using UPI',
+              instruments: [
+                {
+                  method: 'upi',
+                  flows: ['qr', 'intent', 'collect'],
+                },
+              ],
+            },
+            other: {
+              name: 'Other Payment Methods',
+              instruments: [
+                { method: 'card' },
+                { method: 'netbanking' },
+                { method: 'wallet' },
+              ],
+            },
+          },
+          sequence: ['block.upi', 'block.other'],
+          preferences: {
+            show_default_blocks: true,
+          },
+        },
       },
       theme: {
-        color: '#c94f2f',
+        color: '#01621f',
       },
       modal: {
         ondismiss: function () {
@@ -628,7 +696,7 @@ export default function Checkout() {
       <Head>
         <title>Checkout - Paranjape Foods</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+        <script id="razorpay-checkout-script" src="https://checkout.razorpay.com/v1/checkout.js"></script>
       </Head>
 
       <main className="page">
@@ -697,22 +765,37 @@ export default function Checkout() {
                   </p>
 
                   {/* Auth Mode Tabs */}
-                  <div className="auth-tab-group">
-                    <button
-                      type="button"
-                      className={`auth-tab-btn ${authMode === 'login' ? 'active' : ''}`}
-                      onClick={() => { setAuthMode('login'); setError(''); }}
-                    >
-                      Log In
-                    </button>
-                    <button
-                      type="button"
-                      className={`auth-tab-btn ${authMode === 'register' ? 'active' : ''}`}
-                      onClick={() => { setAuthMode('register'); setError(''); }}
-                    >
-                      New Customer (Sign Up)
-                    </button>
-                  </div>
+                  {authMode === 'reset' ? (
+                    <div style={{ background: '#fef3e2', padding: '12px 16px', borderRadius: '8px', border: '1px solid #f2c94c', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.9rem', color: '#8c5800', fontWeight: '500' }}>
+                        🔑 Reset Password for your Mobile Number
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => { setAuthMode('login'); setError(''); }}
+                        style={{ background: 'none', border: 'none', color: '#8c5800', textDecoration: 'underline', cursor: 'pointer', fontSize: '0.85rem' }}
+                      >
+                        ← Back to Login
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="auth-tab-group">
+                      <button
+                        type="button"
+                        className={`auth-tab-btn ${authMode === 'login' ? 'active' : ''}`}
+                        onClick={() => { setAuthMode('login'); setError(''); }}
+                      >
+                        Log In
+                      </button>
+                      <button
+                        type="button"
+                        className={`auth-tab-btn ${authMode === 'register' ? 'active' : ''}`}
+                        onClick={() => { setAuthMode('register'); setError(''); }}
+                      >
+                        New Customer (Sign Up)
+                      </button>
+                    </div>
+                  )}
 
                   {/* Google SSO */}
                   <div className="google-sso-wrapper">
@@ -771,6 +854,24 @@ export default function Checkout() {
                           {showPassword ? '👁️' : '🔒'}
                         </button>
                       </div>
+                      {authMode === 'login' && (
+                        <div style={{ textAlign: 'right', marginTop: '6px' }}>
+                          <button
+                            type="button"
+                            onClick={() => { setAuthMode('reset'); setError(''); }}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: 'var(--accent)',
+                              cursor: 'pointer',
+                              fontSize: '0.85rem',
+                              textDecoration: 'underline',
+                            }}
+                          >
+                            Forgot Password?
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {authMode === 'register' && (
@@ -801,7 +902,7 @@ export default function Checkout() {
                         ← Back to Menu
                       </button>
                       <button type="submit" disabled={loading} className="button">
-                        {loading ? 'Verifying...' : authMode === 'login' ? 'Log In & Continue →' : 'Sign Up & Continue →'}
+                        {loading ? 'Processing...' : authMode === 'login' ? 'Log In & Continue →' : authMode === 'reset' ? 'Reset Password & Continue →' : 'Sign Up & Continue →'}
                       </button>
                     </div>
                   </form>
@@ -1049,7 +1150,7 @@ export default function Checkout() {
                         </p>
                       </div>
                       {selectedAddress === addr._id && (
-                        <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent)', background: 'rgba(201, 79, 47, 0.1)', padding: '3px 8px', borderRadius: '8px' }}>
+                        <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent)', background: 'rgba(236, 34, 39, 0.1)', padding: '3px 8px', borderRadius: '8px' }}>
                           Selected
                         </span>
                       )}
@@ -1060,13 +1161,6 @@ export default function Checkout() {
 
               <div className="new-address-form">
                 <h3>{addresses.length > 0 ? 'Or Add New Address' : 'Add Delivery Address'}</h3>
-
-                {/* Google Maps Delivery Location Picker & Search */}
-                <DeliveryMapPicker
-                  apiKey={process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY}
-                  onAddressSelect={handleMapAddressSelect}
-                  currentAddress={newAddress}
-                />
 
                 <form onSubmit={handleAddAddress}>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.3fr', gap: '12px' }}>
@@ -1245,7 +1339,7 @@ export default function Checkout() {
                 <hr />
                 <div className="summary-item" style={{ fontSize: '0.88rem', color: 'var(--muted)' }}>
                   <span>Delivery Fee</span>
-                  <span style={{ color: '#137333', fontWeight: 600 }}>FREE</span>
+                  <span style={{ color: '#01621f', fontWeight: 600 }}>FREE</span>
                 </div>
                 <div className="summary-total">
                   <strong>To Pay:</strong>
@@ -1257,7 +1351,64 @@ export default function Checkout() {
               <div className="payment-method-container">
                 <h3>Select Payment Method</h3>
                 <div className="payment-options-grid">
-                  {/* Option 1: Cash / Pay on Delivery */}
+                  {/* Option 1: Razorpay Online UPI */}
+                  {Boolean(
+                    (process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_TxVQKWvk1rOGz7') &&
+                    !(process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || '').includes('placeholder') &&
+                    !(process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || '').includes('your_')
+                  ) ? (
+                    <div
+                      className={`payment-option-card ${paymentMethod === 'razorpay' ? 'selected' : ''}`}
+                      onClick={() => setPaymentMethod('razorpay')}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className="payment-radio-indicator">
+                        <div className="payment-radio-inner" />
+                      </div>
+                      <div className="payment-option-body">
+                        <div className="payment-option-header">
+                          <span className="payment-option-title">⚡ Pay Online via UPI (GPay, PhonePe, Paytm, QR)</span>
+                          <span className="payment-badge-recommended" style={{ background: '#e6f5eb', color: '#01621f', borderColor: '#a3d9b4' }}>
+                            Instant &amp; Automated
+                          </span>
+                        </div>
+                        <p className="payment-option-desc">
+                          Instant payment using Google Pay, PhonePe, Paytm, any UPI App, or scan dynamic UPI QR code on your screen. Secured by Razorpay.
+                        </p>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '6px' }}>
+                          <span style={{ fontSize: '0.72rem', background: '#f3f4f6', color: '#374151', padding: '2px 8px', borderRadius: '12px', fontWeight: 600 }}>Google Pay</span>
+                          <span style={{ fontSize: '0.72rem', background: '#f3f4f6', color: '#5f259f', padding: '2px 8px', borderRadius: '12px', fontWeight: 600 }}>PhonePe</span>
+                          <span style={{ fontSize: '0.72rem', background: '#f3f4f6', color: '#002970', padding: '2px 8px', borderRadius: '12px', fontWeight: 600 }}>Paytm</span>
+                          <span style={{ fontSize: '0.72rem', background: '#f3f4f6', color: '#01621f', padding: '2px 8px', borderRadius: '12px', fontWeight: 600 }}>UPI QR Code</span>
+                          <span style={{ fontSize: '0.72rem', background: '#f3f4f6', color: '#6b7280', padding: '2px 8px', borderRadius: '12px', fontWeight: 600 }}>Cards &amp; NetBanking</span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      className="payment-option-card disabled"
+                      aria-disabled="true"
+                      title="Online payment via Razorpay can be activated by adding your Razorpay API keys to .env.local"
+                    >
+                      <div className="payment-radio-indicator" style={{ background: '#f8f9fa', borderColor: '#e5e7eb' }}>
+                        <div className="payment-radio-inner" />
+                      </div>
+                      <div className="payment-option-body">
+                        <div className="payment-option-header">
+                          <span className="payment-option-title" style={{ color: '#8c857b' }}>
+                            Online Payment (Razorpay)
+                          </span>
+                          <span className="payment-badge-disabled">Setup Required</span>
+                        </div>
+                        <p className="payment-option-desc">
+                          Credit/Debit Cards, UPI &amp; NetBanking online gateway. Configure your Razorpay Key ID in <code>.env.local</code> to activate.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Option 2: Cash / Pay on Delivery */}
                   <div
                     className={`payment-option-card ${paymentMethod === 'cod' ? 'selected' : ''}`}
                     onClick={() => setPaymentMethod('cod')}
@@ -1270,32 +1421,10 @@ export default function Checkout() {
                     <div className="payment-option-body">
                       <div className="payment-option-header">
                         <span className="payment-option-title">Pay via Cash / UPI on Delivery</span>
-                        <span className="payment-badge-recommended">Active & Available</span>
+                        <span className="payment-badge-recommended" style={{ background: '#f8f9fa', color: '#555', borderColor: '#e5e7eb' }}>Doorstep Payment</span>
                       </div>
                       <p className="payment-option-desc">
-                        Pay conveniently via Cash, PhonePe, Google Pay, or Paytm directly to the delivery partner when your order arrives.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Option 2: Razorpay Online (Greyed out for now) */}
-                  <div
-                    className="payment-option-card disabled"
-                    aria-disabled="true"
-                    title="Online payment via Razorpay is temporarily unavailable. Please choose Pay on Delivery."
-                  >
-                    <div className="payment-radio-indicator" style={{ background: '#f5f1ea', borderColor: '#e0d8cb' }}>
-                      <div className="payment-radio-inner" />
-                    </div>
-                    <div className="payment-option-body">
-                      <div className="payment-option-header">
-                        <span className="payment-option-title" style={{ color: '#8c857b' }}>
-                          Online Payment (Razorpay)
-                        </span>
-                        <span className="payment-badge-disabled">Temporarily Unavailable</span>
-                      </div>
-                      <p className="payment-option-desc">
-                        Credit/Debit Cards, NetBanking & Razorpay online gateway will be enabled soon. Please use Cash or UPI on delivery.
+                        Pay conveniently via Cash or scan delivery partner's UPI QR card directly when your order arrives.
                       </p>
                     </div>
                   </div>
@@ -1317,6 +1446,8 @@ export default function Checkout() {
                 >
                   {loading
                     ? 'Placing Order...'
+                    : paymentMethod === 'razorpay'
+                    ? `Proceed to Pay ₹${calculateTotal()} via UPI →`
                     : `Place Order (Pay ₹${calculateTotal()} on Delivery)`}
                 </button>
               </div>
@@ -1346,7 +1477,7 @@ export default function Checkout() {
                     </div>
                   </div>
                   <div className="order-status-badge">
-                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#137333', display: 'inline-block' }} />
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#01621f', display: 'inline-block' }} />
                     In Kitchen
                   </div>
                 </div>
@@ -1361,7 +1492,7 @@ export default function Checkout() {
                     <span className="value">
                       {placedOrder?.address
                         ? `${placedOrder.address.flatNo ? placedOrder.address.flatNo + ', ' : ''}${placedOrder.address.buildingName ? placedOrder.address.buildingName + ', ' : ''}${placedOrder.address.street || ''}, ${placedOrder.address.city || ''}`
-                        : 'Your Pune Address'}
+                        : 'Your Delivery Address'}
                     </span>
                   </div>
                   <div className="order-info-row">
@@ -1370,10 +1501,10 @@ export default function Checkout() {
                   </div>
                   <div className="order-info-row">
                     <span className="label">Payment Mode:</span>
-                    <span className="value">
+                    <span className="value" style={{ color: placedOrder?.paymentMethod === 'razorpay' ? '#01621f' : 'inherit', fontWeight: placedOrder?.paymentMethod === 'razorpay' ? 700 : 500 }}>
                       {placedOrder?.paymentMethod === 'razorpay'
-                        ? 'Paid Online (Razorpay)'
-                        : 'Pay on Delivery (Cash / UPI)'}
+                        ? '✓ Paid Online via UPI (Verified)'
+                        : 'Collect Cash/UPI on Delivery'}
                     </span>
                   </div>
                 </div>
@@ -1405,9 +1536,9 @@ export default function Checkout() {
                   type="button"
                   onClick={() => router.push(`/track?orderId=${placedOrder?.orderId}`)}
                   className="button"
-                  style={{ width: '100%', background: '#137333', borderColor: '#137333', justifyContent: 'center' }}
+                  style={{ width: '100%', background: '#01621f', borderColor: '#01621f', justifyContent: 'center' }}
                 >
-                  🚀 Track Live Milestone Updates (Amazon-Style) →
+                  Track Order →
                 </button>
                 <button
                   type="button"

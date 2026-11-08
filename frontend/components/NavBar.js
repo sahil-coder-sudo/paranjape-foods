@@ -43,7 +43,7 @@ const navItems = [
   {
     href: '/track',
     label: 'Track Order',
-    desc: 'Live Amazon-style order milestone updates',
+    desc: 'Live order status & milestone tracking',
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z" />
@@ -76,6 +76,17 @@ const navItems = [
         <path d="M15 6h-5a2 2 0 0 0-2 2v6" />
         <path d="M9 17h6" />
         <path d="M19 17v-4l-3-3h-3" />
+      </svg>
+    ),
+  },
+  {
+    href: '/admin',
+    label: 'Master Admin Portal',
+    desc: 'System overview, users & security credentials',
+    isStaff: true,
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
       </svg>
     ),
   },
@@ -207,7 +218,20 @@ export default function NavBar() {
           aria-label="Paranjape Foods - Return to Home"
           title="Paranjape Foods - Return to Home"
         >
-          Paranjape <span>Foods</span>
+          <img
+            src="/logo.svg"
+            alt="Paranjape Foods Logo"
+            className="brand-logo-img"
+            style={{
+              height: '42px',
+              width: 'auto',
+              marginRight: '10px',
+              display: 'inline-block',
+              verticalAlign: 'middle',
+              objectFit: 'contain',
+            }}
+          />
+          <span style={{ color: '#01621f' }}>Paranjape</span>&nbsp;<span style={{ color: '#ec2227' }}>Foods</span>
         </button>
 
         <div className="header-right-actions">
@@ -222,8 +246,8 @@ export default function NavBar() {
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '6px',
-                background: 'rgba(201, 79, 47, 0.08)',
-                border: '1px solid rgba(201, 79, 47, 0.2)',
+                background: 'rgba(236, 34, 39, 0.08)',
+                border: '1px solid rgba(236, 34, 39, 0.2)',
                 borderRadius: '20px',
                 padding: '6px 12px',
                 fontSize: '0.82rem',
@@ -310,7 +334,19 @@ export default function NavBar() {
             aria-label="Paranjape Foods - Return to Home"
             title="Paranjape Foods - Return to Home"
           >
-            Paranjape <span>Foods</span>
+            <img
+              src="/logo.svg"
+              alt="Paranjape Foods Logo"
+              style={{
+                height: '34px',
+                width: 'auto',
+                marginRight: '8px',
+                display: 'inline-block',
+                verticalAlign: 'middle',
+                objectFit: 'contain',
+              }}
+            />
+            <span style={{ color: '#01621f' }}>Paranjape</span>&nbsp;<span style={{ color: '#ec2227' }}>Foods</span>
           </button>
           <button
             type="button"
@@ -324,7 +360,7 @@ export default function NavBar() {
         </div>
 
         {/* Customer Account Strip in Drawer */}
-        <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', background: customer ? 'rgba(201, 79, 47, 0.04)' : '#fafafa' }}>
+        <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', background: customer ? 'rgba(236, 34, 39, 0.04)' : '#fafafa' }}>
           {customer ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div>
@@ -344,7 +380,7 @@ export default function NavBar() {
                   borderRadius: '6px',
                   padding: '4px 8px',
                   fontSize: '0.74rem',
-                  color: '#c94f2f',
+                  color: '#ec2227',
                   cursor: 'pointer',
                 }}
               >

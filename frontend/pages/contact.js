@@ -18,8 +18,8 @@ export default function Contact() {
           <p>Reach out for reservations, private brunch plans, and quick menu questions.</p>
           <div className="menu-card">
             <h3>Get in touch</h3>
-            <p>123 Garden Street, Suite 5<br />Pune, Maharashtra</p>
-            <p>Phone: <a href="tel:+919876543210">+91 98765 43210</a><br />Email: <a href="mailto:orders@paranjapefoods.com">orders@paranjapefoods.com</a></p>
+            <p>Paranjape Foods Kitchen<br />Fresh Doorstep Delivery</p>
+            <p>Phone: <a href="tel:+918355842877">+91 83558 42877</a><br />Email: <a href="mailto:paranjapefoods15@gmail.com">paranjapefoods15@gmail.com</a></p>
           </div>
         </section>
 
@@ -27,11 +27,12 @@ export default function Contact() {
           <div className="info-grid">
             <article className="info-card">
               <h3>Hours</h3>
-              <p>Mon–Fri 7:30am–3:00pm<br />Sat–Sun 8:00am–4:00pm</p>
+              <p>Mon–Fri <br />8:00am–2:00pm<br />5:30pm–9:30pm</p>
+              <p>Sat–Sun <br />8:00am–2:00pm</p>
             </article>
             <article className="info-card">
-              <h3>Reservations</h3>
-              <p>Call or message us for weekend brunch seating and larger group orders.</p>
+              <h3>Event Orders</h3>
+              <p>Call or message us for event or group orders.</p>
             </article>
           </div>
         </section>
