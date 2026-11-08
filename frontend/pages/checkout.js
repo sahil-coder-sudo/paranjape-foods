@@ -41,7 +41,9 @@ export default function Checkout() {
   const [paymentMethod, setPaymentMethod] = useState('razorpay'); // 'razorpay' (UPI) or 'cod'
   const [placedOrder, setPlacedOrder] = useState(null);
 
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:4000';
+  const API_BASE =
+    process.env.NEXT_PUBLIC_API_BASE ||
+    (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:4000');
 
   useEffect(() => {
     // Load cart from localStorage
