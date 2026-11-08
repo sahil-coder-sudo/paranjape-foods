@@ -4,7 +4,7 @@ export default function DeliveryMapPicker({
   apiKey,
   onAddressSelect,
   currentAddress = {},
-  initialCoords = { lat: 18.5204, lng: 73.8567 }, // Pune, Maharashtra
+  initialCoords = { lat: 18.5204, lng: 73.8567 }, // Default center coordinates
 }) {
   const mapContainerRef = useRef(null);
   const searchInputRef = useRef(null);
@@ -136,8 +136,8 @@ export default function DeliveryMapPicker({
   const parseAndApplyPlace = (place, lat, lng) => {
     let buildingName = place.name || '';
     let street = '';
-    let city = 'Pune';
-    let state = 'Maharashtra';
+    let city = '';
+    let state = '';
     let zipCode = '';
 
     if (place.address_components) {
@@ -262,7 +262,7 @@ export default function DeliveryMapPicker({
           ref={searchInputRef}
           type="text"
           className="map-search-input"
-          placeholder="Search building, street, or area in Pune..."
+          placeholder="Search building, street, or area..."
           aria-label="Search delivery location"
         />
       </div>

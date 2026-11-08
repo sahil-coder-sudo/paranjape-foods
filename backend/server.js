@@ -1,5 +1,13 @@
 const fs = require('fs');
 const path = require('path');
+const dns = require('dns');
+
+// Configure reliable DNS servers (Google & Cloudflare) for MongoDB SRV lookups on macOS/Node
+try {
+  dns.setServers(['8.8.8.8', '1.1.1.1']);
+} catch (dnsErr) {
+  // Ignore in sandboxed environments
+}
 
 // Load environment variables from .env.local, .env, or parent workspace directories
 const candidateEnvPaths = [
@@ -26,11 +34,15 @@ const ContactMessage = require('./models/ContactMessage');
 const Customer = require('./models/Customer');
 const Address = require('./models/Address');
 const Order = require('./models/Order');
+const StaffCredential = require('./models/StaffCredential');
+const StaffUser = require('./models/StaffUser');
 const {
   generateCustomerToken,
   verifyCustomerToken,
   requireCustomerAuth,
   verifyGoogleIdToken,
+  generateStaffUserToken,
+  verifyStaffUserToken,
 } = require('./utils/auth');
 
 const app = express();
@@ -58,7 +70,10 @@ mongoose.connect(mongoUri, {
   useUnifiedTopology: true,
   dbName: 'paranjape_foods',
 })
-  .then(() => console.log('MongoDB connected'))
+  .then(() => {
+    console.log('MongoDB connected');
+    initStaffCredentials();
+  })
   .catch((err) => console.error('MongoDB connection error:', err));
 
 // Real-time SSE (Server-Sent Events) subscription system
@@ -266,6 +281,48 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// Customer Password Reset: verify phone and update password
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { phone, newPassword } = req.body;
+    if (!phone || !newPassword) {
+      return res.status(400).json({ error: 'Phone number and new password are required.' });
+    }
+    const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
+    if (cleanPhone.length !== 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
+    }
+    if (String(newPassword).trim().length < 4) {
+      return res.status(400).json({ error: 'New password must be at least 4 characters long.' });
+    }
+
+    const customer = await Customer.findOne({
+      $or: [{ phone: cleanPhone }, { phone: `+91${cleanPhone}` }, { phone: `91${cleanPhone}` }],
+    }).select('+passwordHash');
+
+    if (!customer) {
+      return res.status(404).json({ error: 'No account found with this phone number.' });
+    }
+
+    await customer.setPassword(String(newPassword).trim());
+    customer.lastLoginAt = new Date();
+    await customer.save();
+
+    const token = generateCustomerToken(customer);
+    logger.info(`[Auth Reset] Password reset successfully for customer ${customer._id} (${cleanPhone})`);
+
+    res.json({
+      success: true,
+      token,
+      customer: customer.toJSON(),
+      message: 'Password reset successfully. You are now logged in.',
+    });
+  } catch (error) {
+    logger.error('[Auth Reset] Reset error:', error);
+    res.status(500).json({ error: 'Failed to reset password. Please try again.' });
+  }
+});
+
 // Google SSO: Verify Google Identity Services ID token & sign in / register
 app.post('/api/auth/google', async (req, res) => {
   try {
@@ -442,7 +499,7 @@ app.get('/api/customer/:customerId', async (req, res) => {
   }
 });
 
-// Validate and save address (supports client coordinates or server geocoding fallback)
+// Validate and save address directly from customer input
 app.post('/api/address/validate', async (req, res) => {
   try {
     const { customerId, flatNo, buildingName, street, city, state, zipCode, latitude, longitude } = req.body;
@@ -458,31 +515,7 @@ app.post('/api/address/validate', async (req, res) => {
     let lat = typeof latitude === 'number' ? latitude : parseFloat(latitude);
     let lng = typeof longitude === 'number' ? longitude : parseFloat(longitude);
 
-    // If client did not provide coordinates, try Google Maps Geocoding if key is available
-    if (isNaN(lat) || isNaN(lng)) {
-      const apiKey = process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-      if (apiKey) {
-        try {
-          // Geocode using building name + street (excluding flat number for highest accuracy)
-          const geocodeAddress = [trimmedBldg, trimmedStreet, city, state || '', zipCode || ''].filter(Boolean).join(', ');
-          const googleMapsUrl = `https://maps.googleapis.com/maps/api/geocode/json`;
-          const response = await axios.get(googleMapsUrl, {
-            params: { address: geocodeAddress, key: apiKey },
-            timeout: 3000,
-          });
-
-          if (response.data && response.data.results && response.data.results.length > 0) {
-            const loc = response.data.results[0].geometry.location;
-            lat = loc.lat;
-            lng = loc.lng;
-          }
-        } catch (geoErr) {
-          console.warn('Server geocoding skipped/failed (using fallback):', geoErr.message);
-        }
-      }
-    }
-
-    // Default to Pune coordinates if still unresolved
+    // Default coordinates if unset
     if (isNaN(lat) || isNaN(lng)) {
       lat = 18.5204;
       lng = 73.8567;
@@ -569,7 +602,8 @@ app.post('/api/order/create', async (req, res) => {
     try {
       const populatedNewOrder = await Order.findById(order._id)
         .populate('customerId')
-        .populate('addressId');
+        .populate('addressId')
+        .populate('assignedRiderId', 'name phone vehicleNumber currentStatus');
       if (populatedNewOrder) {
         broadcastOrderUpdate(populatedNewOrder, 'new_order');
       }
@@ -635,52 +669,57 @@ app.get('/api/logs', (req, res) => {
   }
 });
 
-// Verify payment and confirm order (Razorpay deferred)
+// Verify payment and confirm order
 app.post('/api/payment/verify', async (req, res) => {
   try {
-    const { orderId, razorpayPaymentId, razorpaySignature } = req.body;
+    const { orderId, razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
+
+    const existingOrder = await Order.findById(orderId);
+    if (!existingOrder) return res.status(404).json({ error: 'Order not found.' });
 
     // If Razorpay is not configured, skip signature verification
     if (!razorpay) {
-      // Just confirm the order (offline/COD flow)
-      const order = await Order.findByIdAndUpdate(
-        orderId,
-        {
-          paymentStatus: 'unpaid', // Will be collected on delivery
-          orderStatus: 'confirmed',
-        },
-        { new: true }
-      );
-      if (!order) return res.status(404).json({ error: 'Order not found.' });
-      return res.json({ status: 'ok', order });
+      existingOrder.paymentStatus = 'unpaid'; // Will be collected on delivery
+      existingOrder.orderStatus = 'confirmed';
+      await existingOrder.save();
+      return res.json({ status: 'ok', order: existingOrder });
     }
 
-    // Razorpay verification
-    const crypto = require('crypto');
+    // Razorpay signature verification
+    const rzpOrderRef = razorpayOrderId || existingOrder.razorpayOrderId;
     const hmac = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
-    hmac.update(orderId + '|' + razorpayPaymentId);
+    hmac.update((rzpOrderRef || orderId) + '|' + razorpayPaymentId);
     const generatedSignature = hmac.digest('hex');
 
     if (generatedSignature !== razorpaySignature) {
+      logger.warn(`[Payment Verify] Signature mismatch for order ${orderId}`);
       return res.status(400).json({ error: 'Invalid payment signature.' });
     }
 
     // Update order with payment details
-    const order = await Order.findByIdAndUpdate(
-      orderId,
-      {
-        paymentStatus: 'success',
-        razorpayPaymentId,
-        orderStatus: 'confirmed',
-      },
-      { new: true }
-    );
+    existingOrder.paymentStatus = 'paid';
+    existingOrder.paymentMethod = 'razorpay';
+    existingOrder.razorpayPaymentId = razorpayPaymentId;
+    existingOrder.orderStatus = 'confirmed';
+    if (!Array.isArray(existingOrder.statusHistory)) existingOrder.statusHistory = [];
+    existingOrder.statusHistory.push({
+      status: 'confirmed',
+      timestamp: new Date(),
+      message: `Payment of ₹${existingOrder.totalAmount} received successfully via Razorpay (ID: ${razorpayPaymentId}).`,
+    });
+    await existingOrder.save();
 
-    if (!order) return res.status(404).json({ error: 'Order not found.' });
+    const populated = await Order.findById(existingOrder._id)
+      .populate('customerId')
+      .populate('addressId')
+      .populate('assignedRiderId', 'name phone vehicleNumber currentStatus');
 
-    res.json({ success: true, order });
+    broadcastOrderUpdate(populated, 'order_update');
+    logger.info(`[Payment Verify] Order ${existingOrder._id} verified and paid via Razorpay`);
+
+    res.json({ success: true, order: populated });
   } catch (error) {
-    console.error('Payment verification error:', error);
+    logger.error('Payment verification error:', error);
     res.status(500).json({ error: 'Payment verification failed.' });
   }
 });
@@ -690,7 +729,8 @@ app.get('/api/order/:orderId', async (req, res) => {
   try {
     const order = await Order.findById(req.params.orderId)
       .populate('customerId')
-      .populate('addressId');
+      .populate('addressId')
+      .populate('assignedRiderId', 'name phone vehicleNumber currentStatus');
     if (!order) return res.status(404).json({ error: 'Order not found.' });
     res.json(order);
   } catch (error) {
@@ -714,9 +754,82 @@ app.get('/api/orders/:customerId', async (req, res) => {
 
 // ===== KITCHEN & DELIVERY AUTHENTICATION =====
 const isProduction = process.env.NODE_ENV === 'production';
-const MANAGER_PASSCODE = process.env.MANAGER_PASSCODE || (isProduction ? null : 'paranjape2026');
-const DELIVERY_PASSCODE = process.env.DELIVERY_PASSCODE || (isProduction ? null : 'rider2026');
+const ADMIN_PASSCODE = process.env.ADMIN_PASSCODE || (isProduction ? null : 'admin2026') || 'admin2026';
+const MANAGER_PASSCODE = process.env.MANAGER_PASSCODE || (isProduction ? null : 'paranjape2026') || 'paranjape2026';
+const DELIVERY_PASSCODE = process.env.DELIVERY_PASSCODE || (isProduction ? null : 'rider2026') || 'rider2026';
 const AUTH_SECRET = process.env.MANAGER_AUTH_SECRET || process.env.JWT_SECRET || 'paranjape_kitchen_auth_secret_key_2026';
+
+async function initStaffCredentials() {
+  try {
+    const roles = [
+      { role: 'admin', defaultPass: ADMIN_PASSCODE },
+      { role: 'manager', defaultPass: MANAGER_PASSCODE },
+      { role: 'delivery', defaultPass: DELIVERY_PASSCODE },
+    ];
+    for (const item of roles) {
+      const exists = await StaffCredential.findOne({ role: item.role });
+      if (!exists && item.defaultPass) {
+        const cred = new StaffCredential({ role: item.role, updatedBy: 'system' });
+        await cred.setPasscode(item.defaultPass);
+        await cred.save();
+        logger.info(`[Staff Credentials] Initialized default credentials for role: ${item.role}`);
+      }
+    }
+
+    // Seed default Manager & Delivery StaffUser accounts if none exist
+    const staffCount = await StaffUser.countDocuments();
+    if (staffCount === 0) {
+      const defaultOwner = new StaffUser({
+        name: 'Kitchen Manager / Owner',
+        phone: '9082305196',
+        email: 'manager@paranjapefoods.com',
+        role: 'owner',
+        isActive: true,
+      });
+      await defaultOwner.setPassword('paranjape2026');
+      await defaultOwner.save();
+
+      const defaultRider = new StaffUser({
+        name: 'Delivery Rider 1',
+        phone: '9082305196',
+        role: 'delivery',
+        vehicleNumber: 'MH 47 PF 2026',
+        isActive: true,
+      });
+      await defaultRider.setPassword('rider2026');
+      await defaultRider.save();
+
+      logger.info('[Staff Users] Seeded initial Owner (9876540001) and Delivery Partner (9876540002)');
+    }
+  } catch (err) {
+    logger.error('[Staff Credentials] Error initializing credentials:', err);
+  }
+}
+
+async function verifyRolePasscode(role, candidatePasscode) {
+  const clean = String(candidatePasscode || '').trim();
+  if (!clean) return false;
+
+  try {
+    const cred = await StaffCredential.findOne({ role });
+    if (cred && cred.passcodeHash) {
+      const match = await cred.comparePasscode(clean);
+      if (match) return true;
+    }
+  } catch (err) {
+    logger.error(`[Staff Auth] Error verifying credential for role ${role}:`, err);
+  }
+
+  // Fallback to env passcodes
+  if (role === 'admin' && ADMIN_PASSCODE && clean === ADMIN_PASSCODE) return true;
+  if (role === 'manager' && MANAGER_PASSCODE && clean === MANAGER_PASSCODE) return true;
+  if (role === 'delivery' && DELIVERY_PASSCODE && clean === DELIVERY_PASSCODE) return true;
+
+  // Master Admin passcode can also authenticate manager & delivery
+  if (ADMIN_PASSCODE && clean === ADMIN_PASSCODE) return true;
+
+  return false;
+}
 
 if (isProduction && (!process.env.MANAGER_PASSCODE || !process.env.DELIVERY_PASSCODE)) {
   logger.warn('[Auth Warning] MANAGER_PASSCODE or DELIVERY_PASSCODE is not set in environment variables! Please configure in Heroku / production.');
@@ -729,17 +842,37 @@ function generateStaffToken(role = 'manager') {
   return `${payload}:${sig}`;
 }
 
-function verifyStaffToken(token, allowedRoles = ['manager', 'delivery']) {
+function verifyStaffToken(token, allowedRoles = ['admin', 'owner', 'manager', 'delivery']) {
   if (!token || typeof token !== 'string') return null;
+
+  // 1. Check if token is a modern StaffUser JWT
+  if (token.includes('.')) {
+    const jwtStaff = verifyStaffUserToken(token, allowedRoles);
+    if (jwtStaff) {
+      return {
+        role: jwtStaff.role,
+        staffId: jwtStaff.staffId,
+        name: jwtStaff.name,
+        phone: jwtStaff.phone,
+        vehicleNumber: jwtStaff.vehicleNumber,
+      };
+    }
+  }
+
+  // 2. Fallback to HMAC staff token (role:expiry:signature)
   const parts = token.split(':');
-  if (parts.length !== 3) return null;
-  const [role, expiryStr, signature] = parts;
-  if (!allowedRoles.includes(role)) return null;
-  const expiry = parseInt(expiryStr, 10);
-  if (isNaN(expiry) || Date.now() > expiry) return null;
-  const expected = crypto.createHmac('sha256', AUTH_SECRET).update(`${role}:${expiryStr}`).digest('hex');
-  if (signature !== expected) return null;
-  return { role, expiry };
+  if (parts.length === 3) {
+    const [role, expiryStr, signature] = parts;
+    if (!allowedRoles.includes(role)) return null;
+    const expiry = parseInt(expiryStr, 10);
+    if (isNaN(expiry) || Date.now() > expiry) return null;
+    const expected = crypto.createHmac('sha256', AUTH_SECRET).update(`${role}:${expiryStr}`).digest('hex');
+    if (signature === expected) {
+      return { role, expiry };
+    }
+  }
+
+  return null;
 }
 
 function generateManagerToken() {
@@ -747,20 +880,36 @@ function generateManagerToken() {
 }
 
 function verifyManagerToken(token) {
-  return !!verifyStaffToken(token, ['manager']);
+  return !!verifyStaffToken(token, ['manager', 'owner', 'admin']);
+}
+
+function requireAdminAuth(req, res, next) {
+  const authHeader = req.headers['x-admin-token'] || req.headers.authorization;
+  const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || req.query.token;
+
+  if (!token || !verifyStaffToken(token, ['admin'])) {
+    logger.warn(`[Admin Auth] Unauthorized access attempt to ${req.method} ${req.originalUrl}`);
+    return res.status(401).json({
+      error: 'Unauthorized. Master administrator authentication required.',
+      code: 'UNAUTHORIZED_ADMIN',
+    });
+  }
+  next();
 }
 
 function requireManagerAuth(req, res, next) {
-  const authHeader = req.headers['x-manager-token'] || req.headers.authorization;
+  const authHeader = req.headers['x-manager-token'] || req.headers['x-admin-token'] || req.headers.authorization;
   const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || req.query.token;
 
-  if (!token || !verifyStaffToken(token, ['manager'])) {
+  const staff = verifyStaffToken(token, ['manager', 'owner', 'admin']);
+  if (!token || !staff) {
     logger.warn(`[Manager Auth] Unauthorized access attempt to ${req.method} ${req.originalUrl}`);
     return res.status(401).json({
-      error: 'Unauthorized. Kitchen manager authentication required.',
+      error: 'Unauthorized. Kitchen manager or owner authentication required.',
       code: 'UNAUTHORIZED_MANAGER',
     });
   }
+  req.staff = staff;
   next();
 }
 
@@ -768,39 +917,87 @@ function requireDeliveryAuth(req, res, next) {
   const authHeader = req.headers['x-delivery-token'] || req.headers['x-manager-token'] || req.headers.authorization;
   const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || req.query.token;
 
-  if (!token || !verifyStaffToken(token, ['delivery', 'manager'])) {
+  const staff = verifyStaffToken(token, ['delivery', 'manager', 'owner', 'admin']);
+  if (!token || !staff) {
     logger.warn(`[Delivery Auth] Unauthorized access attempt to ${req.method} ${req.originalUrl}`);
     return res.status(401).json({
       error: 'Unauthorized. Delivery partner authentication required.',
       code: 'UNAUTHORIZED_DELIVERY',
     });
   }
+  req.staff = staff;
   next();
 }
 
-// Authenticate kitchen staff / manager with passcode
-app.post('/api/admin/auth/verify', (req, res) => {
+// Authenticate kitchen staff / manager with Phone + Password OR passcode
+app.post('/api/admin/auth/verify', async (req, res) => {
   try {
-    const { passcode } = req.body;
-    const cleanInput = String(passcode || '').trim();
+    const { phone, password, passcode } = req.body;
 
-    if (!MANAGER_PASSCODE) {
-      logger.error('[Manager Auth] MANAGER_PASSCODE not configured on server.');
-      return res.status(500).json({ error: 'Manager authentication not configured on server.' });
+    // A. Phone + Password (Individual Staff Account)
+    if (phone && password) {
+      const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
+      const staffUser = await StaffUser.findOne({
+        $or: [{ phone: cleanPhone }, { phone: `+91${cleanPhone}` }, { phone: `91${cleanPhone}` }],
+      }).select('+passwordHash');
+
+      if (!staffUser) {
+        return res.status(401).json({
+          success: false,
+          error: 'No manager or owner account found with this phone number.',
+        });
+      }
+
+      if (!staffUser.isActive) {
+        return res.status(403).json({
+          success: false,
+          error: 'This manager account has been deactivated.',
+        });
+      }
+
+      if (!['owner', 'manager'].includes(staffUser.role)) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access restricted to Managers and Owners.',
+        });
+      }
+
+      const isMatch = await staffUser.comparePassword(String(password).trim());
+      if (!isMatch) {
+        return res.status(401).json({
+          success: false,
+          error: 'Incorrect password. Please try again.',
+        });
+      }
+
+      staffUser.lastLoginAt = new Date();
+      await staffUser.save();
+
+      const token = generateStaffUserToken(staffUser);
+      logger.info(`[Manager Auth] Staff ${staffUser.name} (${staffUser.phone}) logged in to Kitchen Portal`);
+      return res.json({
+        success: true,
+        token,
+        role: staffUser.role,
+        user: staffUser.toJSON(),
+        message: 'Authentication successful',
+      });
     }
 
-    const isValid = cleanInput === MANAGER_PASSCODE;
+    // B. Passcode fallback
+    const cleanPasscode = String(passcode || password || '').trim();
+    const isValid = await verifyRolePasscode('manager', cleanPasscode);
 
     if (!isValid) {
       logger.warn('[Manager Auth] Invalid passcode attempt entered');
       return res.status(401).json({
         success: false,
-        error: 'Incorrect passcode. Please enter the valid kitchen staff passcode.',
+        error: 'Incorrect credentials. Enter your phone & password or staff passcode.',
       });
     }
 
     const token = generateManagerToken();
-    logger.info('[Manager Auth] Staff successfully authenticated to Kitchen Portal');
+    logger.info('[Manager Auth] Staff authenticated to Kitchen Portal via passcode');
     res.json({
       success: true,
       token,
@@ -819,36 +1016,83 @@ app.get('/api/admin/auth/check', (req, res) => {
   const authHeader = req.headers['x-manager-token'] || req.headers.authorization;
   const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || req.query.token;
 
-  if (token && verifyStaffToken(token, ['manager'])) {
-    return res.json({ authenticated: true, role: 'manager' });
+  const staff = token ? verifyStaffToken(token, ['manager', 'owner', 'admin']) : null;
+  if (staff) {
+    return res.json({ authenticated: true, role: staff.role, user: staff });
   }
   res.status(401).json({ authenticated: false, error: 'Session expired or invalid.' });
 });
 
-// Authenticate delivery partner with passcode / PIN
-app.post('/api/delivery/auth/verify', (req, res) => {
+// Authenticate delivery partner with Phone + PIN OR passcode
+app.post('/api/delivery/auth/verify', async (req, res) => {
   try {
-    const { passcode } = req.body;
-    const cleanInput = String(passcode || '').trim();
+    const { phone, password, passcode } = req.body;
 
-    if (!DELIVERY_PASSCODE && !MANAGER_PASSCODE) {
-      logger.error('[Delivery Auth] DELIVERY_PASSCODE not configured on server.');
-      return res.status(500).json({ error: 'Delivery authentication not configured on server.' });
+    // A. Phone + PIN (Individual Delivery Partner Account)
+    if (phone && (password || passcode)) {
+      const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
+      const staffUser = await StaffUser.findOne({
+        $or: [{ phone: cleanPhone }, { phone: `+91${cleanPhone}` }, { phone: `91${cleanPhone}` }],
+      }).select('+passwordHash');
+
+      if (!staffUser) {
+        return res.status(401).json({
+          success: false,
+          error: 'No rider account found with this phone number.',
+        });
+      }
+
+      if (!staffUser.isActive) {
+        return res.status(403).json({
+          success: false,
+          error: 'This delivery partner account is currently inactive.',
+        });
+      }
+
+      if (!['delivery', 'owner'].includes(staffUser.role)) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access restricted to Delivery Fleet partners.',
+        });
+      }
+
+      const inputPin = String(password || passcode).trim();
+      const isMatch = await staffUser.comparePassword(inputPin);
+      if (!isMatch) {
+        return res.status(401).json({
+          success: false,
+          error: 'Incorrect rider PIN. Please try again.',
+        });
+      }
+
+      staffUser.lastLoginAt = new Date();
+      await staffUser.save();
+
+      const token = generateStaffUserToken(staffUser);
+      logger.info(`[Delivery Auth] Rider ${staffUser.name} (${staffUser.phone}) logged in to Rider Portal`);
+      return res.json({
+        success: true,
+        token,
+        role: staffUser.role,
+        user: staffUser.toJSON(),
+        message: 'Delivery partner authentication successful',
+      });
     }
 
-    // Accept valid DELIVERY_PASSCODE (or MANAGER_PASSCODE for manager oversight)
-    const isValid = cleanInput === DELIVERY_PASSCODE || cleanInput === MANAGER_PASSCODE;
+    // B. Passcode fallback
+    const cleanPasscode = String(passcode || password || '').trim();
+    const isValid = (await verifyRolePasscode('delivery', cleanPasscode)) || (await verifyRolePasscode('manager', cleanPasscode));
 
     if (!isValid) {
       logger.warn('[Delivery Auth] Invalid delivery passcode attempt entered');
       return res.status(401).json({
         success: false,
-        error: 'Incorrect delivery passcode. Please enter a valid rider passcode.',
+        error: 'Incorrect rider credentials. Enter your phone & PIN or staff passcode.',
       });
     }
 
     const token = generateStaffToken('delivery');
-    logger.info('[Delivery Auth] Delivery partner authenticated to Delivery Portal');
+    logger.info('[Delivery Auth] Delivery partner authenticated to Delivery Portal via passcode');
     res.json({
       success: true,
       token,
@@ -867,8 +1111,9 @@ app.get('/api/delivery/auth/check', (req, res) => {
   const authHeader = req.headers['x-delivery-token'] || req.headers['x-manager-token'] || req.headers.authorization;
   const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || req.query.token;
 
-  if (token && verifyStaffToken(token, ['delivery', 'manager'])) {
-    return res.json({ authenticated: true, role: 'delivery' });
+  const staff = token ? verifyStaffToken(token, ['delivery', 'manager', 'owner', 'admin']) : null;
+  if (staff) {
+    return res.json({ authenticated: true, role: staff.role, user: staff });
   }
   res.status(401).json({ authenticated: false, error: 'Session expired or invalid.' });
 });
@@ -881,6 +1126,7 @@ app.get('/api/delivery/orders', requireDeliveryAuth, async (req, res) => {
     })
       .populate('customerId')
       .populate('addressId')
+      .populate('assignedRiderId', 'name phone vehicleNumber currentStatus')
       .sort({ updatedAt: -1 })
       .limit(60);
 
@@ -902,6 +1148,13 @@ app.put('/api/delivery/order/:orderId/pickup', requireDeliveryAuth, async (req, 
     if (!order) return res.status(404).json({ error: 'Order not found.' });
 
     order.orderStatus = 'out_for_delivery';
+
+    // Auto-assign to current rider if not already assigned
+    if (!order.assignedRiderId && req.staff && req.staff.staffId) {
+      order.assignedRiderId = req.staff.staffId;
+      order.assignedAt = new Date();
+    }
+
     if (!Array.isArray(order.statusHistory)) order.statusHistory = [];
     order.statusHistory.push({
       status: 'out_for_delivery',
@@ -912,7 +1165,8 @@ app.put('/api/delivery/order/:orderId/pickup', requireDeliveryAuth, async (req, 
     await order.save();
     const populated = await Order.findById(order._id)
       .populate('customerId')
-      .populate('addressId');
+      .populate('addressId')
+      .populate('assignedRiderId', 'name phone vehicleNumber currentStatus');
 
     broadcastOrderUpdate(populated, 'order_update');
     logger.info(`[Delivery Pickup] Order ${order._id} marked out for delivery`);
@@ -935,13 +1189,14 @@ app.put('/api/delivery/order/:orderId/deliver', requireDeliveryAuth, async (req,
     order.statusHistory.push({
       status: 'delivered',
       timestamp: new Date(),
-      message: 'Order safely delivered to your doorstep. Thank you for choosing Paranjape Foods!',
+      message: 'Order safely handed over to resident. Thank you for choosing Paranjape Foods!',
     });
 
     await order.save();
     const populated = await Order.findById(order._id)
       .populate('customerId')
-      .populate('addressId');
+      .populate('addressId')
+      .populate('assignedRiderId', 'name phone vehicleNumber currentStatus');
 
     broadcastOrderUpdate(populated, 'order_update');
     logger.info(`[Delivery Complete] Order ${order._id} marked delivered`);
@@ -971,6 +1226,7 @@ app.get('/api/admin/orders', requireManagerAuth, async (req, res) => {
     const orders = await Order.find(query)
       .populate('customerId')
       .populate('addressId')
+      .populate('assignedRiderId', 'name phone vehicleNumber currentStatus')
       .sort({ createdAt: -1 })
       .limit(100);
 
@@ -994,7 +1250,7 @@ app.put('/api/order/:orderId/status', requireManagerAuth, async (req, res) => {
       preparing: 'Chef is preparing and packaging your dishes.',
       ready: 'Meal is neatly packed, sealed & ready for delivery pickup.',
       out_for_delivery: 'Delivery partner has picked up your meal and is on the way.',
-      delivered: 'Order delivered to your doorstep. Bon appétit!',
+      delivered: 'Order safely handed over to resident. Bon appétit!',
       cancelled: 'Order has been cancelled.',
     };
 
@@ -1018,7 +1274,8 @@ app.put('/api/order/:orderId/status', requireManagerAuth, async (req, res) => {
 
     const populated = await Order.findById(order._id)
       .populate('customerId')
-      .populate('addressId');
+      .populate('addressId')
+      .populate('assignedRiderId', 'name phone vehicleNumber currentStatus');
 
     // Real-time broadcast to customer & kitchen streams
     broadcastOrderUpdate(populated, 'order_update');
@@ -1028,6 +1285,142 @@ app.put('/api/order/:orderId/status', requireManagerAuth, async (req, res) => {
   } catch (error) {
     logger.error('[Order Status] Failed to update order status:', error);
     res.status(500).json({ error: 'Unable to update order status.' });
+  }
+});
+
+// Manager / Admin: Edit Customer Delivery Address on an Order
+app.put('/api/admin/order/:orderId/address', requireManagerAuth, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { flatNo, buildingName, street, city, state, zipCode } = req.body;
+
+    const order = await Order.findById(orderId).populate('addressId');
+    if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+    let address = null;
+    if (order.addressId && order.addressId._id) {
+      address = await Address.findById(order.addressId._id);
+    }
+
+    if (address) {
+      if (flatNo !== undefined) address.flatNo = String(flatNo).trim();
+      if (buildingName !== undefined) address.buildingName = String(buildingName).trim();
+      if (street !== undefined) address.street = String(street).trim();
+      if (city !== undefined) address.city = String(city).trim();
+      if (state !== undefined) address.state = String(state).trim();
+      if (zipCode !== undefined) address.zipCode = String(zipCode).trim();
+      await address.save();
+    } else {
+      address = await Address.create({
+        customerId: order.customerId,
+        flatNo: String(flatNo || '').trim(),
+        buildingName: String(buildingName || '').trim(),
+        street: String(street || buildingName || '').trim(),
+        city: String(city || '').trim(),
+        state: String(state || '').trim(),
+        zipCode: String(zipCode || '').trim(),
+        latitude: 18.5204,
+        longitude: 73.8567,
+      });
+      order.addressId = address._id;
+      await order.save();
+    }
+
+    const updatedOrder = await Order.findById(orderId)
+      .populate('customerId')
+      .populate('addressId')
+      .populate('assignedRiderId', 'name phone vehicleNumber currentStatus');
+
+    // Broadcast update to real-time SSE streams
+    broadcastOrderUpdate(updatedOrder, 'order_update');
+
+    logger.info(`[Order Address] Manager updated delivery address for order ${orderId}`);
+    res.json({
+      success: true,
+      message: 'Delivery address updated successfully.',
+      order: updatedOrder,
+      address,
+    });
+  } catch (err) {
+    logger.error('[Order Address] Error updating order address:', err);
+    res.status(500).json({ error: 'Failed to update delivery address.' });
+  }
+});
+
+// Manager / Admin: Fetch Active Delivery Fleet Partners
+app.get('/api/staff/riders', requireManagerAuth, async (req, res) => {
+  try {
+    const riders = await StaffUser.find({ role: 'delivery', isActive: true })
+      .select('name phone vehicleNumber currentStatus lastLoginAt')
+      .sort({ name: 1 });
+    res.json(riders);
+  } catch (err) {
+    logger.error('[Staff Riders] Error fetching delivery fleet:', err);
+    res.status(500).json({ error: 'Failed to fetch delivery fleet.' });
+  }
+});
+
+// Manager / Admin: Assign or Reassign an Order to a Delivery Partner
+app.put('/api/admin/order/:orderId/assign-rider', requireManagerAuth, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { riderId } = req.body;
+
+    const order = await Order.findById(orderId);
+    if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+    let rider = null;
+    if (riderId) {
+      rider = await StaffUser.findOne({ _id: riderId, role: 'delivery', isActive: true });
+      if (!rider) {
+        return res.status(400).json({ error: 'Selected delivery partner was not found or is inactive.' });
+      }
+
+      order.assignedRiderId = rider._id;
+      order.assignedAt = new Date();
+
+      if (!Array.isArray(order.statusHistory)) order.statusHistory = [];
+      order.statusHistory.push({
+        status: order.orderStatus,
+        timestamp: new Date(),
+        message: `Assigned to delivery partner ${rider.name} (${rider.vehicleNumber || rider.phone})`,
+      });
+
+      logger.info(`[Order Assign] Order ${orderId} assigned to rider ${rider.name} (${rider.phone})`);
+    } else {
+      // Unassign
+      order.assignedRiderId = null;
+      order.assignedAt = null;
+
+      if (!Array.isArray(order.statusHistory)) order.statusHistory = [];
+      order.statusHistory.push({
+        status: order.orderStatus,
+        timestamp: new Date(),
+        message: 'Order unassigned from delivery partner.',
+      });
+
+      logger.info(`[Order Assign] Order ${orderId} unassigned`);
+    }
+
+    await order.save();
+
+    const populated = await Order.findById(orderId)
+      .populate('customerId')
+      .populate('addressId')
+      .populate('assignedRiderId', 'name phone vehicleNumber currentStatus');
+
+    // Broadcast update to real-time SSE streams
+    broadcastOrderUpdate(populated, 'order_update');
+
+    res.json({
+      success: true,
+      message: rider ? `Order assigned to ${rider.name}!` : 'Order unassigned successfully.',
+      order: populated,
+      rider: rider ? { id: rider._id, name: rider.name, phone: rider.phone, vehicleNumber: rider.vehicleNumber } : null,
+    });
+  } catch (err) {
+    logger.error('[Order Assign] Error assigning rider:', err);
+    res.status(500).json({ error: 'Failed to assign delivery partner.' });
   }
 });
 
@@ -1079,6 +1472,615 @@ app.get('/api/admin/orders/stream', (req, res) => {
   req.on('close', () => {
     adminSubscribers.delete(res);
   });
+});
+
+// ===== ADMIN MASTER PORTAL & CREDENTIAL MANAGEMENT APIS =====
+
+// 1. Admin Master Login
+app.post('/api/admin/master-auth', async (req, res) => {
+  try {
+    const { passcode } = req.body;
+    const isValid = await verifyRolePasscode('admin', passcode);
+
+    if (!isValid) {
+      logger.warn('[Admin Auth] Invalid admin passcode attempt');
+      return res.status(401).json({ success: false, error: 'Invalid master admin passcode.' });
+    }
+
+    const token = generateStaffToken('admin');
+    logger.info('[Admin Auth] Administrator authenticated successfully');
+    res.json({
+      success: true,
+      token,
+      role: 'admin',
+      expiresIn: '24h',
+      message: 'Admin authentication successful',
+    });
+  } catch (err) {
+    logger.error('[Admin Auth] Login error:', err);
+    res.status(500).json({ error: 'Server authentication error.' });
+  }
+});
+
+// 2. Admin Session Check
+app.get('/api/admin/auth/check-master', (req, res) => {
+  const authHeader = req.headers['x-admin-token'] || req.headers.authorization;
+  const token = authHeader?.replace(/^Bearer\s+/i, '').trim() || req.query.token;
+
+  if (token && verifyStaffToken(token, ['admin'])) {
+    return res.json({ authenticated: true, role: 'admin' });
+  }
+  res.status(401).json({ authenticated: false, error: 'Admin session expired or invalid.' });
+});
+
+// 3. Admin Overview / Analytics
+app.get('/api/admin/overview', requireAdminAuth, async (req, res) => {
+  try {
+    const totalCustomers = await Customer.countDocuments();
+    const totalOrders = await Order.countDocuments();
+    const totalMenuItems = await MenuItem.countDocuments();
+
+    // Aggregated revenue (exclude cancelled)
+    const revenueAgg = await Order.aggregate([
+      { $match: { orderStatus: { $ne: 'cancelled' } } },
+      { $group: { _id: null, total: { $sum: '$totalAmount' } } },
+    ]);
+    const totalRevenue = revenueAgg.length > 0 ? revenueAgg[0].total : 0;
+
+    // Status breakdown
+    const statusCounts = await Order.aggregate([
+      { $group: { _id: '$orderStatus', count: { $sum: 1 } } },
+    ]);
+    const statusMap = {};
+    statusCounts.forEach(s => { statusMap[s._id] = s.count; });
+
+    // Recent 10 orders
+    const recentOrders = await Order.find()
+      .populate('customerId', 'name phone')
+      .populate('addressId', 'buildingName street city')
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    // Today's live operational metrics (resets every midnight IST)
+    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const todayStart = new Date(`${todayStr}T00:00:00+05:30`);
+    const todayEnd = new Date(`${todayStr}T23:59:59.999+05:30`);
+
+    const todayOrdersCount = await Order.countDocuments({
+      createdAt: { $gte: todayStart, $lte: todayEnd },
+    });
+
+    const todayDeliveredCount = await Order.countDocuments({
+      createdAt: { $gte: todayStart, $lte: todayEnd },
+      orderStatus: 'delivered',
+    });
+
+    const todayRevenueAgg = await Order.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: todayStart, $lte: todayEnd },
+          orderStatus: { $ne: 'cancelled' },
+        },
+      },
+      {
+        $group: {
+          _id: '$paymentMethod',
+          total: { $sum: '$totalAmount' },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    let todayRevenue = 0;
+    let todayUpiRevenue = 0;
+    let todayCodRevenue = 0;
+    todayRevenueAgg.forEach((r) => {
+      todayRevenue += r.total;
+      if (r._id === 'razorpay' || r._id === 'upi') todayUpiRevenue += r.total;
+      else todayCodRevenue += r.total;
+    });
+
+    res.json({
+      totalRevenue,
+      totalOrders,
+      totalCustomers,
+      totalMenuItems,
+      statusCounts: statusMap,
+      recentOrders,
+      today: {
+        date: todayStr,
+        ordersCount: todayOrdersCount,
+        deliveredCount: todayDeliveredCount,
+        revenue: todayRevenue,
+        upiRevenue: todayUpiRevenue,
+        codRevenue: todayCodRevenue,
+      },
+    });
+  } catch (err) {
+    logger.error('[Admin Overview] Error generating stats:', err);
+    res.status(500).json({ error: 'Failed to retrieve overview stats.' });
+  }
+});
+
+// 3B. Comprehensive Reports & Historical Analytics (Daily, Monthly, Custom Range)
+app.get('/api/admin/reports', requireManagerAuth, async (req, res) => {
+  try {
+    const { period = 'daily', month, date, startDate, endDate } = req.query;
+
+    let query = {};
+    if (date) {
+      const dayStart = new Date(`${date}T00:00:00+05:30`);
+      const dayEnd = new Date(`${date}T23:59:59.999+05:30`);
+      query.createdAt = { $gte: dayStart, $lte: dayEnd };
+    } else if (month) {
+      const [year, m] = month.split('-');
+      const monthStart = new Date(`${year}-${m}-01T00:00:00+05:30`);
+      const lastDay = new Date(parseInt(year, 10), parseInt(m, 10), 0).getDate();
+      const monthEnd = new Date(`${year}-${m}-${String(lastDay).padStart(2, '0')}T23:59:59.999+05:30`);
+      query.createdAt = { $gte: monthStart, $lte: monthEnd };
+    } else if (startDate && endDate) {
+      const start = new Date(`${startDate}T00:00:00+05:30`);
+      const end = new Date(`${endDate}T23:59:59.999+05:30`);
+      query.createdAt = { $gte: start, $lte: end };
+    }
+
+    const orders = await Order.find(query)
+      .populate('customerId', 'name phone email')
+      .populate('addressId', 'buildingName street city zipCode')
+      .populate('assignedRiderId', 'name phone vehicleNumber')
+      .sort({ createdAt: -1 });
+
+    let totalOrders = orders.length;
+    let deliveredOrders = 0;
+    let cancelledOrders = 0;
+    let activeOrders = 0;
+    let totalRevenue = 0;
+    let upiRevenue = 0;
+    let codRevenue = 0;
+
+    const timelineMap = {};
+    const dishMap = {};
+    const riderMap = {};
+
+    orders.forEach((o) => {
+      const istDateStr = new Date(o.createdAt).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      const istMonthStr = istDateStr.slice(0, 7); // YYYY-MM
+      const groupKey = period === 'monthly' ? istMonthStr : istDateStr;
+
+      const isDelivered = o.orderStatus === 'delivered';
+      const isCancelled = o.orderStatus === 'cancelled';
+      const amount = Number(o.totalAmount) || 0;
+      const isUPI = o.paymentMethod === 'razorpay' || o.paymentMethod === 'upi';
+
+      if (isDelivered) deliveredOrders++;
+      else if (isCancelled) cancelledOrders++;
+      else activeOrders++;
+
+      if (!isCancelled) {
+        totalRevenue += amount;
+        if (isUPI) upiRevenue += amount;
+        else codRevenue += amount;
+      }
+
+      if (!timelineMap[groupKey]) {
+        timelineMap[groupKey] = {
+          key: groupKey,
+          label: period === 'monthly'
+            ? new Date(`${groupKey}-01T12:00:00+05:30`).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+            : new Date(`${groupKey}T12:00:00+05:30`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', weekday: 'short' }),
+          ordersCount: 0,
+          deliveredCount: 0,
+          cancelledCount: 0,
+          activeCount: 0,
+          totalRevenue: 0,
+          upiRevenue: 0,
+          codRevenue: 0,
+          dishesSold: 0,
+          dishTally: {},
+          orders: [],
+        };
+      }
+
+      const t = timelineMap[groupKey];
+      t.ordersCount++;
+      if (isDelivered) t.deliveredCount++;
+      else if (isCancelled) t.cancelledCount++;
+      else t.activeCount++;
+
+      if (!isCancelled) {
+        t.totalRevenue += amount;
+        if (isUPI) t.upiRevenue += amount;
+        else t.codRevenue += amount;
+      }
+
+      t.orders.push({
+        _id: o._id,
+        orderId: o._id.toString(),
+        shortId: o._id.toString().slice(-6).toUpperCase(),
+        totalAmount: amount,
+        orderStatus: o.orderStatus,
+        paymentMethod: o.paymentMethod,
+        paymentStatus: o.paymentStatus,
+        customerName: o.customerId?.name || 'Customer',
+        customerPhone: o.customerId?.phone || '-',
+        addressSummary: o.addressId ? `${o.addressId.buildingName || ''} ${o.addressId.street || ''} ${o.addressId.city || ''}`.trim() : '-',
+        riderName: o.assignedRiderId?.name || 'Unassigned',
+        createdAt: o.createdAt,
+        itemsCount: (o.items || []).reduce((acc, it) => acc + (it.quantity || 1), 0),
+        dishesText: (o.items || []).map((it) => `${it.title || 'Item'} × ${it.quantity}`).join(', '),
+      });
+
+      // Dishes sold tally
+      (o.items || []).forEach((item) => {
+        const title = item.title || 'Specialty Dish';
+        const qty = Number(item.quantity) || 1;
+        const price = Number(item.price) || 0;
+        const itemRev = qty * price;
+
+        t.dishesSold += qty;
+        t.dishTally[title] = (t.dishTally[title] || 0) + qty;
+
+        if (!dishMap[title]) {
+          dishMap[title] = { title, quantity: 0, revenue: 0 };
+        }
+        if (!isCancelled) {
+          dishMap[title].quantity += qty;
+          dishMap[title].revenue += itemRev;
+        }
+      });
+
+      // Rider settlement tally
+      if (o.assignedRiderId) {
+        const rId = o.assignedRiderId._id ? o.assignedRiderId._id.toString() : o.assignedRiderId.toString();
+        const rName = o.assignedRiderId.name || 'Rider';
+        if (!riderMap[rId]) {
+          riderMap[rId] = {
+            riderId: rId,
+            name: rName,
+            phone: o.assignedRiderId.phone || '',
+            vehicleNumber: o.assignedRiderId.vehicleNumber || '',
+            deliveredCount: 0,
+            activeCount: 0,
+            cashCollected: 0,
+            onlineDelivered: 0,
+          };
+        }
+        if (isDelivered) {
+          riderMap[rId].deliveredCount++;
+          if (!isUPI) {
+            riderMap[rId].cashCollected += amount;
+          } else {
+            riderMap[rId].onlineDelivered += amount;
+          }
+        } else if (!isCancelled) {
+          riderMap[rId].activeCount++;
+        }
+      }
+    });
+
+    const timeline = Object.values(timelineMap)
+      .map((entry) => {
+        let topDish = '-';
+        let topCount = 0;
+        Object.entries(entry.dishTally).forEach(([name, count]) => {
+          if (count > topCount) {
+            topCount = count;
+            topDish = `${name} (${count})`;
+          }
+        });
+        return {
+          ...entry,
+          topDish,
+          avgOrderValue: entry.ordersCount > 0 ? Math.round(entry.totalRevenue / entry.ordersCount) : 0,
+        };
+      })
+      .sort((a, b) => b.key.localeCompare(a.key));
+
+    const topDishes = Object.values(dishMap).sort((a, b) => b.quantity - a.quantity);
+    const riderSettlement = Object.values(riderMap).sort((a, b) => b.deliveredCount - a.deliveredCount);
+
+    res.json({
+      success: true,
+      period,
+      filter: { month: month || null, date: date || null, startDate: startDate || null, endDate: endDate || null },
+      summary: {
+        totalOrders,
+        deliveredOrders,
+        cancelledOrders,
+        activeOrders,
+        totalRevenue,
+        upiRevenue,
+        codRevenue,
+        avgOrderValue: totalOrders > 0 ? Math.round(totalRevenue / totalOrders) : 0,
+        deliveredRate: totalOrders > 0 ? Math.round((deliveredOrders / totalOrders) * 100) : 0,
+      },
+      timeline,
+      topDishes,
+      riderSettlement,
+    });
+  } catch (err) {
+    logger.error('[Reports API] Error generating report:', err);
+    res.status(500).json({ error: 'Failed to generate report.' });
+  }
+});
+
+// 4. Admin Customers List & Search
+app.get('/api/admin/customers', requireAdminAuth, async (req, res) => {
+  try {
+    const query = String(req.query.search || '').trim();
+    let filter = {};
+    if (query) {
+      filter = {
+        $or: [
+          { name: { $regex: query, $options: 'i' } },
+          { phone: { $regex: query, $options: 'i' } },
+          { email: { $regex: query, $options: 'i' } },
+        ],
+      };
+    }
+
+    const customers = await Customer.find(filter)
+      .populate('addresses')
+      .sort({ createdAt: -1 })
+      .limit(100);
+
+    // Attach order count
+    const customerIds = customers.map(c => c._id);
+    const orderCounts = await Order.aggregate([
+      { $match: { customerId: { $in: customerIds } } },
+      { $group: { _id: '$customerId', count: { $sum: 1 } } },
+    ]);
+    const orderCountMap = {};
+    orderCounts.forEach(o => { orderCountMap[String(o._id)] = o.count; });
+
+    const enriched = customers.map(c => ({
+      ...c.toJSON(),
+      orderCount: orderCountMap[String(c._id)] || 0,
+      addressCount: (c.addresses || []).length,
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    logger.error('[Admin Customers] Error fetching customers:', err);
+    res.status(500).json({ error: 'Failed to fetch customer directory.' });
+  }
+});
+
+// 5. Admin Reset Customer Password
+app.post('/api/admin/customers/:id/reset-password', requireAdminAuth, async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword || String(newPassword).trim().length < 4) {
+      return res.status(400).json({ error: 'New password must be at least 4 characters long.' });
+    }
+
+    const customer = await Customer.findById(req.params.id);
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found.' });
+    }
+
+    await customer.setPassword(String(newPassword).trim());
+    await customer.save();
+
+    logger.info(`[Admin Customer] Admin reset password for customer ${customer._id} (${customer.phone})`);
+    res.json({
+      success: true,
+      message: `Password successfully reset for customer ${customer.name} (${customer.phone}).`,
+    });
+  } catch (err) {
+    logger.error('[Admin Customer] Error resetting customer password:', err);
+    res.status(500).json({ error: 'Failed to reset customer password.' });
+  }
+});
+
+// 6. Admin Get Staff Passcodes Status
+app.get('/api/admin/staff-credentials', requireAdminAuth, async (req, res) => {
+  try {
+    const creds = await StaffCredential.find().select('-passcodeHash');
+    res.json(creds);
+  } catch (err) {
+    logger.error('[Admin Credentials] Error fetching credentials:', err);
+    res.status(500).json({ error: 'Failed to retrieve credentials status.' });
+  }
+});
+
+// 7. Admin Reset Staff Passcode (Manager, Delivery, or Admin)
+app.post('/api/admin/staff-credentials/reset', requireAdminAuth, async (req, res) => {
+  try {
+    const { role, newPasscode } = req.body;
+    if (!role || !['manager', 'delivery', 'admin'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role. Must be manager, delivery, or admin.' });
+    }
+    if (!newPasscode || String(newPasscode).trim().length < 4) {
+      return res.status(400).json({ error: 'New passcode must be at least 4 characters long.' });
+    }
+
+    let cred = await StaffCredential.findOne({ role });
+    if (!cred) {
+      cred = new StaffCredential({ role });
+    }
+    await cred.setPasscode(String(newPasscode).trim());
+    cred.updatedBy = 'admin';
+    cred.lastUpdated = new Date();
+    await cred.save();
+
+    logger.info(`[Admin Credentials] Reset passcode for role: ${role}`);
+    res.json({
+      success: true,
+      role,
+      message: `Passcode for ${role} has been updated successfully.`,
+    });
+  } catch (err) {
+    logger.error('[Admin Credentials] Error updating passcode:', err);
+    res.status(500).json({ error: 'Failed to update passcode.' });
+  }
+});
+
+// 8. Staff Self-Reset (From /manager or /delivery with Admin Key)
+app.post('/api/admin/staff/self-reset', async (req, res) => {
+  try {
+    const { role, adminRecoveryKey, newPasscode } = req.body;
+    if (!role || !['manager', 'delivery'].includes(role)) {
+      return res.status(400).json({ error: 'Role must be manager or delivery.' });
+    }
+    if (!newPasscode || String(newPasscode).trim().length < 4) {
+      return res.status(400).json({ error: 'New passcode must be at least 4 characters.' });
+    }
+
+    const isAdminValid = await verifyRolePasscode('admin', adminRecoveryKey);
+    if (!isAdminValid) {
+      return res.status(401).json({ error: 'Invalid Admin Recovery Key. Authorization rejected.' });
+    }
+
+    let cred = await StaffCredential.findOne({ role });
+    if (!cred) {
+      cred = new StaffCredential({ role });
+    }
+    await cred.setPasscode(String(newPasscode).trim());
+    cred.updatedBy = 'self-reset-via-admin-key';
+    cred.lastUpdated = new Date();
+    await cred.save();
+
+    logger.info(`[Staff Self-Reset] Successfully updated ${role} passcode via admin recovery key`);
+    res.json({
+      success: true,
+      message: `Passcode for ${role} has been updated successfully. You can now log in with the new passcode.`,
+    });
+  } catch (err) {
+    logger.error('[Staff Self-Reset] Error in self-reset:', err);
+    res.status(500).json({ error: 'Self-reset failed. Please try again.' });
+  }
+});
+
+// 9. Admin Staff Users Directory (Get all managers/owners and delivery fleet)
+app.get('/api/admin/staff-users', requireAdminAuth, async (req, res) => {
+  try {
+    const { role } = req.query;
+    const filter = {};
+    if (role && ['owner', 'manager', 'delivery'].includes(role)) {
+      filter.role = role;
+    }
+    const staffList = await StaffUser.find(filter).sort({ role: 1, createdAt: -1 });
+    res.json(staffList);
+  } catch (err) {
+    logger.error('[Admin Staff] Error fetching staff:', err);
+    res.status(500).json({ error: 'Failed to fetch staff directory.' });
+  }
+});
+
+// 10. Admin Create Staff User (Manager, Owner, or Delivery Partner)
+app.post('/api/admin/staff-users', requireAdminAuth, async (req, res) => {
+  try {
+    const { name, phone, email, role, password, vehicleNumber } = req.body;
+    if (!name || !phone || !role || !password) {
+      return res.status(400).json({ error: 'Name, 10-digit phone, role, and password/PIN are required.' });
+    }
+    const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
+    if (cleanPhone.length !== 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
+    }
+    if (!['owner', 'manager', 'delivery'].includes(role)) {
+      return res.status(400).json({ error: 'Role must be owner, manager, or delivery.' });
+    }
+    if (String(password).trim().length < 4) {
+      return res.status(400).json({ error: 'Password/PIN must be at least 4 characters long.' });
+    }
+
+    const existing = await StaffUser.findOne({ phone: cleanPhone });
+    if (existing) {
+      return res.status(400).json({ error: 'A staff member with this phone number already exists.' });
+    }
+
+    const staffUser = new StaffUser({
+      name: name.trim(),
+      phone: cleanPhone,
+      email: email ? email.trim().toLowerCase() : '',
+      role,
+      vehicleNumber: vehicleNumber ? vehicleNumber.trim().toUpperCase() : '',
+      isActive: true,
+      createdBy: 'admin',
+    });
+    await staffUser.setPassword(String(password).trim());
+    await staffUser.save();
+
+    logger.info(`[Admin Staff] Created new staff member: ${staffUser.name} (${cleanPhone}, ${role})`);
+    res.status(201).json({
+      success: true,
+      message: `${role.toUpperCase()} account created successfully.`,
+      user: staffUser.toJSON(),
+    });
+  } catch (err) {
+    logger.error('[Admin Staff] Error creating staff member:', err);
+    res.status(500).json({ error: 'Failed to create staff member.' });
+  }
+});
+
+// 11. Admin Update Staff User Details / Active Status
+app.put('/api/admin/staff-users/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const { name, email, role, vehicleNumber, isActive } = req.body;
+    const staffUser = await StaffUser.findById(req.params.id);
+    if (!staffUser) return res.status(404).json({ error: 'Staff member not found.' });
+
+    if (name !== undefined) staffUser.name = String(name).trim();
+    if (email !== undefined) staffUser.email = String(email).trim().toLowerCase();
+    if (role !== undefined && ['owner', 'manager', 'delivery'].includes(role)) staffUser.role = role;
+    if (vehicleNumber !== undefined) staffUser.vehicleNumber = String(vehicleNumber).trim().toUpperCase();
+    if (isActive !== undefined) staffUser.isActive = Boolean(isActive);
+
+    await staffUser.save();
+    logger.info(`[Admin Staff] Updated staff member ${staffUser._id} (${staffUser.name})`);
+    res.json({
+      success: true,
+      message: 'Staff member details updated.',
+      user: staffUser.toJSON(),
+    });
+  } catch (err) {
+    logger.error('[Admin Staff] Error updating staff member:', err);
+    res.status(500).json({ error: 'Failed to update staff member.' });
+  }
+});
+
+// 12. Admin Reset Specific Staff Password / PIN
+app.post('/api/admin/staff-users/:id/reset-password', requireAdminAuth, async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword || String(newPassword).trim().length < 4) {
+      return res.status(400).json({ error: 'New password must be at least 4 characters long.' });
+    }
+
+    const staffUser = await StaffUser.findById(req.params.id);
+    if (!staffUser) return res.status(404).json({ error: 'Staff member not found.' });
+
+    await staffUser.setPassword(String(newPassword).trim());
+    await staffUser.save();
+
+    logger.info(`[Admin Staff] Reset password for staff user ${staffUser._id} (${staffUser.phone}, ${staffUser.role})`);
+    res.json({
+      success: true,
+      message: `Password/PIN reset successfully for ${staffUser.name}.`,
+    });
+  } catch (err) {
+    logger.error('[Admin Staff] Error resetting staff password:', err);
+    res.status(500).json({ error: 'Failed to reset staff password.' });
+  }
+});
+
+// 13. Admin Delete Staff User
+app.delete('/api/admin/staff-users/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const staffUser = await StaffUser.findByIdAndDelete(req.params.id);
+    if (!staffUser) return res.status(404).json({ error: 'Staff member not found.' });
+
+    logger.info(`[Admin Staff] Deleted staff member ${staffUser.name} (${staffUser.phone})`);
+    res.json({
+      success: true,
+      message: `Staff member ${staffUser.name} removed.`,
+    });
+  } catch (err) {
+    logger.error('[Admin Staff] Error deleting staff member:', err);
+    res.status(500).json({ error: 'Failed to delete staff member.' });
+  }
 });
 
 app.listen(port, () => {
