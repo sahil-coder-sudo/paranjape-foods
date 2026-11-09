@@ -45,6 +45,11 @@ export default function Checkout() {
     process.env.NEXT_PUBLIC_API_BASE ||
     (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:4000');
 
+  const RAZORPAY_KEY =
+    process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID ||
+    process.env.NEXT_RAZORPAY_KEY_ID ||
+    'rzp_test_TxVQKWvk1rOGz7';
+
   useEffect(() => {
     // Load cart from localStorage
     const savedCart = localStorage.getItem('cart');
@@ -597,7 +602,7 @@ export default function Checkout() {
     }
 
     const options = {
-      key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_TxVQKWvk1rOGz7',
+      key: RAZORPAY_KEY,
       amount: Math.round(Number(orderData.amount) * 100),
       currency: 'INR',
       name: 'Paranjape Foods',
@@ -1355,9 +1360,9 @@ export default function Checkout() {
                 <div className="payment-options-grid">
                   {/* Option 1: Razorpay Online UPI */}
                   {Boolean(
-                    (process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_TxVQKWvk1rOGz7') &&
-                    !(process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || '').includes('placeholder') &&
-                    !(process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || '').includes('your_')
+                    RAZORPAY_KEY &&
+                    !RAZORPAY_KEY.includes('placeholder') &&
+                    !RAZORPAY_KEY.includes('your_')
                   ) ? (
                     <div
                       className={`payment-option-card ${paymentMethod === 'razorpay' ? 'selected' : ''}`}
